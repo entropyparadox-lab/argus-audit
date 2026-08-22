@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-[Features](#-key-features) • [Architecture](#-architecture) • [Quickstart](#-5-minute-quickstart) • [CLI Usage](#-cli-commands) • [Comparison](docs/COMPARISON.md) • [Contributing](CONTRIBUTING.md)
+[Features](#-key-features) • [Architecture](#-architecture) • [Quickstart](#-5-minute-quickstart) • [Deployment Guide](docs/DEPLOYMENT.md) • [CLI Usage](#-cli-commands) • [Comparison](docs/COMPARISON.md) • [Contributing](CONTRIBUTING.md)
 
 </div>
 
