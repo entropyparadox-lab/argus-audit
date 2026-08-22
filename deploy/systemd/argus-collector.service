@@ -1,0 +1,23 @@
+[Unit]
+Description=Argus Audit Central Log Ingestion Collector
+After=network.target tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/log/argus
+ExecStart=/usr/local/bin/argus-collector run --bind 0.0.0.0:19532 --db /var/log/argus/audit.db
+Restart=always
+RestartSec=5s
+LimitNOFILE=65536
+Environment=RUST_LOG=info
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/argus
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
