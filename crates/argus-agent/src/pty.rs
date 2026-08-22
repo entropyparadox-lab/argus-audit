@@ -92,7 +92,7 @@ impl PtyRunner {
         let winsize = if stdout().is_terminal() {
             let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
             unsafe {
-                libc::ioctl(stdout().as_raw_fd(), libc::TIOCGWINSZ, &mut ws);
+                libc::ioctl(stdout().as_raw_fd(), libc::TIOCGWINSZ as _, &mut ws);
             }
             Some(Winsize {
                 ws_row: ws.ws_row,
@@ -113,7 +113,7 @@ impl PtyRunner {
                 // Child: set up new session and dup slave to std fds
                 unsafe {
                     libc::setsid();
-                    libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
+                    libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0);
                 }
 
                 dup2(slave_fd, libc::STDIN_FILENO)?;
@@ -156,8 +156,8 @@ impl PtyRunner {
             if RESIZE_FLAG.swap(false, Ordering::Relaxed) && stdout().is_terminal() {
                 let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
                 unsafe {
-                    if libc::ioctl(stdout_fd, libc::TIOCGWINSZ, &mut ws) == 0 {
-                        libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws);
+                    if libc::ioctl(stdout_fd, libc::TIOCGWINSZ as _, &mut ws) == 0 {
+                        libc::ioctl(master_fd, libc::TIOCSWINSZ as _, &ws);
                     }
                 }
             }
