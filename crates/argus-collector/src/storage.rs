@@ -218,8 +218,16 @@ impl AuditStore {
             let prev_hash: String = row.get(1)?;
             let hash: String = row.get(2)?;
             let payload_json: String = row.get(3)?;
-            ChainedAuditEvent::from_raw(seq, &prev_hash, &hash, &payload_json)
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+            ChainedAuditEvent::from_raw(seq, &prev_hash, &hash, &payload_json).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    )),
+                )
+            })
         })?;
 
         let mut chained_events = Vec::new();
