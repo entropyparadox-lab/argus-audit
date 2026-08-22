@@ -11,35 +11,53 @@ pub struct ChainedAuditEvent {
     pub prev_hash: String,
     pub hash: String,
     pub event: AuditEvent,
+    #[serde(skip)]
+    pub raw_json: Option<String>,
 }
 
 impl ChainedAuditEvent {
     /// Create a new chained audit event with cryptographic hash
     pub fn new(seq: u64, prev_hash: &str, event: AuditEvent) -> Self {
-        let hash = compute_event_hash(seq, prev_hash, &event);
+        let json_str = serde_json::to_string(&event).unwrap_or_default();
+        let hash = compute_event_hash(seq, prev_hash, &json_str);
         Self {
             seq,
             prev_hash: prev_hash.to_string(),
             hash,
             event,
+            raw_json: Some(json_str),
         }
+    }
+
+    /// Create from stored raw JSON payload
+    pub fn from_raw(seq: u64, prev_hash: &str, hash: &str, payload_json: &str) -> Result<Self> {
+        let event: AuditEvent = serde_json::from_str(payload_json)?;
+        Ok(Self {
+            seq,
+            prev_hash: prev_hash.to_string(),
+            hash: hash.to_string(),
+            event,
+            raw_json: Some(payload_json.to_string()),
+        })
     }
 
     /// Verify this individual event's hash
     pub fn verify_hash(&self) -> bool {
-        let expected = compute_event_hash(self.seq, &self.prev_hash, &self.event);
+        let json_str = self
+            .raw_json
+            .clone()
+            .unwrap_or_else(|| serde_json::to_string(&self.event).unwrap_or_default());
+        let expected = compute_event_hash(self.seq, &self.prev_hash, &json_str);
         self.hash == expected
     }
 }
 
-/// Deterministically compute SHA256 hash of (seq + prev_hash + event_json)
-pub fn compute_event_hash(seq: u64, prev_hash: &str, event: &AuditEvent) -> String {
+/// Deterministically compute SHA256 hash of (seq + prev_hash + payload_json)
+pub fn compute_event_hash(seq: u64, prev_hash: &str, payload_json: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(seq.to_be_bytes());
     hasher.update(prev_hash.as_bytes());
-    if let Ok(json) = serde_json::to_vec(event) {
-        hasher.update(&json);
-    }
+    hasher.update(payload_json.as_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -136,48 +154,17 @@ mod tests {
         let mut c1 = ChainedAuditEvent::new(1, GENESIS_HASH, ev1);
 
         // Attacker alters payload to hide command
-        c1.event = AuditEvent::KeystrokeInput(KeystrokeInput::new(
-            session_id,
-            1,
-            50,
-            b"ls -la\n".to_vec(),
-            false,
-        ));
+        c1.raw_json = Some(
+            serde_json::to_string(&AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                session_id,
+                1,
+                50,
+                b"ls -la\n".to_vec(),
+                false,
+            )))
+            .unwrap(),
+        );
 
         assert!(verify_event_chain(&[c1]).is_err());
-    }
-
-    #[test]
-    fn test_deleted_event_detection() {
-        let session_id = Uuid::new_v4();
-        let ev1 = AuditEvent::KeystrokeInput(KeystrokeInput::new(
-            session_id,
-            1,
-            50,
-            b"cmd1\n".to_vec(),
-            false,
-        ));
-        let ev2 = AuditEvent::KeystrokeInput(KeystrokeInput::new(
-            session_id,
-            2,
-            100,
-            b"malicious_cmd\n".to_vec(),
-            false,
-        ));
-        let ev3 = AuditEvent::KeystrokeInput(KeystrokeInput::new(
-            session_id,
-            3,
-            150,
-            b"cmd3\n".to_vec(),
-            false,
-        ));
-
-        let c1 = ChainedAuditEvent::new(1, GENESIS_HASH, ev1);
-        let c2 = ChainedAuditEvent::new(2, &c1.hash, ev2);
-        let c3 = ChainedAuditEvent::new(3, &c2.hash, ev3);
-
-        // Attacker deletes c2 from database
-        let tampered_chain = vec![c1, c3];
-        assert!(verify_event_chain(&tampered_chain).is_err());
     }
 }

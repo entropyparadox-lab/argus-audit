@@ -173,11 +173,12 @@ impl AuditStore {
                 )?;
             }
 
-            // Record into events table with cryptographic hash chain
+            // Record into events table with cryptographic hash chain and deterministic raw JSON
+            let raw_json_str = chained.raw_json.unwrap_or(payload_json);
             tx.execute(
                 "INSERT INTO events (session_id, seq, prev_hash, hash, event_type, timestamp, payload)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![session_id_str, chained.seq, chained.prev_hash, chained.hash, event_type, timestamp_str, payload_json],
+                params![session_id_str, chained.seq, chained.prev_hash, chained.hash, event_type, timestamp_str, raw_json_str],
             )?;
         }
 
@@ -217,19 +218,8 @@ impl AuditStore {
             let prev_hash: String = row.get(1)?;
             let hash: String = row.get(2)?;
             let payload_json: String = row.get(3)?;
-            let event: AuditEvent = serde_json::from_str(&payload_json).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-            Ok(ChainedAuditEvent {
-                seq,
-                prev_hash,
-                hash,
-                event,
-            })
+            ChainedAuditEvent::from_raw(seq, &prev_hash, &hash, &payload_json)
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
         })?;
 
         let mut chained_events = Vec::new();
