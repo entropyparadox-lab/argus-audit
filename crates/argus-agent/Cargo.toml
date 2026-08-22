@@ -1,0 +1,24 @@
+[package]
+name = "argus-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Lightweight zero-overhead host audit agent for Argus Audit"
+
+[dependencies]
+argus-common = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
