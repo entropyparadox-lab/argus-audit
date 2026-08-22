@@ -1,3 +1,4 @@
+use crate::redaction::SecretRedactor;
 use argus_common::events::{AuditEvent, KeystrokeInput, SessionEnd, SessionInit};
 use nix::pty::{openpty, Winsize};
 use nix::sys::select::{select, FdSet};
@@ -64,14 +65,21 @@ pub struct PtyRunner {
     pub session_id: Uuid,
     pub shell: String,
     pub event_tx: Sender<AuditEvent>,
+    pub mask_secrets: bool,
 }
 
 impl PtyRunner {
-    pub fn new(session_id: Uuid, shell: String, event_tx: Sender<AuditEvent>) -> Self {
+    pub fn new(
+        session_id: Uuid,
+        shell: String,
+        event_tx: Sender<AuditEvent>,
+        mask_secrets: bool,
+    ) -> Self {
         Self {
             session_id,
             shell,
             event_tx,
+            mask_secrets,
         }
     }
 
@@ -168,23 +176,31 @@ impl PtyRunner {
                             Ok(0) => break, // EOF on stdin
                             Ok(n) => {
                                 let elapsed = start_time.elapsed().as_millis() as u64;
-                                let slice = in_buf[..n].to_vec();
-                                let is_paste = n > 16 || slice.starts_with(b"\x1b[200~");
+                                let raw_slice = in_buf[..n].to_vec();
+                                let is_paste = n > 16 || raw_slice.starts_with(b"\x1b[200~");
 
                                 in_seq += 1;
                                 total_bytes += n as u64;
+
+                                // Redact in-flight secrets before queuing event if enabled
+                                let recorded_slice = if self.mask_secrets {
+                                    SecretRedactor::redact_bytes(&raw_slice)
+                                } else {
+                                    raw_slice.clone()
+                                };
 
                                 let event = KeystrokeInput::new(
                                     self.session_id,
                                     in_seq,
                                     elapsed,
-                                    slice.clone(),
+                                    recorded_slice,
                                     is_paste,
                                 );
                                 let _ = self.event_tx.send(AuditEvent::KeystrokeInput(event));
 
-                                // Forward stdin directly to child PTY master
-                                let _ = write(unsafe { BorrowedFd::borrow_raw(master_fd) }, &slice);
+                                // Forward original stdin directly to child PTY master (unaltered execution)
+                                let _ =
+                                    write(unsafe { BorrowedFd::borrow_raw(master_fd) }, &raw_slice);
                             }
                             Err(_) => break,
                         }

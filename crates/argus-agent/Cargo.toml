@@ -22,3 +22,4 @@ nix = { workspace = true }
 libc = { workspace = true }
 reqwest = { workspace = true }
 bytes = { workspace = true }
+regex = { workspace = true }

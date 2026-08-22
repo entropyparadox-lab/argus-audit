@@ -9,6 +9,7 @@ description = "High-throughput central audit event ingestion and storage daemon"
 [dependencies]
 argus-common = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

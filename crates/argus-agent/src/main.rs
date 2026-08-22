@@ -31,6 +31,10 @@ enum Commands {
         /// Local spool file path for offline buffering
         #[arg(long, env = "ARGUS_SPOOL_PATH")]
         spool: Option<PathBuf>,
+
+        /// Automatically mask in-flight credentials (AWS, OpenAI, Private Keys) before transmission
+        #[arg(long, env = "ARGUS_MASK_SECRETS", default_value_t = true)]
+        mask_secrets: bool,
     },
 }
 
@@ -44,6 +48,7 @@ fn main() -> anyhow::Result<()> {
             shell,
             collector,
             spool,
+            mask_secrets,
         } => {
             let session_id = Uuid::new_v4();
             let shell_path = shell
@@ -65,8 +70,8 @@ fn main() -> anyhow::Result<()> {
                 rt.block_on(uploader.run_loop(rx));
             });
 
-            // Run PTY foreground loop
-            let runner = PtyRunner::new(session_id, shell_path, tx);
+            // Run PTY foreground loop with optional in-flight secret masking
+            let runner = PtyRunner::new(session_id, shell_path, tx, mask_secrets);
             let exit_status = runner.run(init_event)?;
 
             // Wait for uploader to finish flushing remaining events

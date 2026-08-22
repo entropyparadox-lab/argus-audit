@@ -93,11 +93,13 @@ impl EventUploader {
                         .send()
                         .await
                     {
-                        Ok(resp) if resp.status().is_success() => {
-                            // Successfully uploaded
-                        }
                         Ok(resp) => {
-                            warn!("Collector returned non-success status: {}", resp.status());
+                            if resp.headers().contains_key("X-Argus-Force-Kill") {
+                                warn!("⚠️ Received X-Argus-Force-Kill header from collector! Terminating session immediately.");
+                                unsafe {
+                                    libc::kill(0, libc::SIGKILL);
+                                }
+                            }
                         }
                         Err(e) => {
                             error!("Failed to upload audit event batch to collector: {e}");
