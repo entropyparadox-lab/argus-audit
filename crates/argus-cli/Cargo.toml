@@ -22,3 +22,5 @@ clap = { workspace = true }
 rusqlite = { workspace = true }
 reqwest = { workspace = true }
 nix = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }

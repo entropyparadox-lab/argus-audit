@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
-use argus_analyzer::{ClaudePromptParser, SemanticSummarizer, SessionCorrelator};
+use argus_analyzer::{
+    ClaudePromptParser, ProcessTreeBuilder, PromptDriftDetector, SemanticSummarizer,
+    SessionCorrelator,
+};
 use argus_collector::{AuditStore, SessionSummary};
 use argus_common::events::AuditEvent;
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
 use reqwest::Client;
 use std::io::{stdout, Write};
 use std::path::PathBuf;
@@ -44,13 +48,37 @@ enum Commands {
         speed: f64,
     },
 
+    /// Stream live session keystrokes in real-time (SSE)
+    Live {
+        /// Session UUID
+        session_id: String,
+    },
+
+    /// Send emergency force-kill signal to terminate a remote session
+    Kill {
+        /// Session UUID
+        session_id: String,
+    },
+
     /// Dump all raw events of a session in JSONL
     Dump {
         /// Session UUID
         session_id: String,
     },
 
-    /// Correlate session activity and build LLM semantic analysis report
+    /// Cryptographically verify session log integrity and tamper evidence
+    Verify {
+        /// Session UUID
+        session_id: String,
+    },
+
+    /// Render process execution tree and sub-process lineages
+    Tree {
+        /// Session UUID
+        session_id: String,
+    },
+
+    /// Correlate session activity, prompt drift, and build LLM semantic analysis report
     Analyze {
         /// Session UUID
         session_id: String,
@@ -75,11 +103,48 @@ async fn main() -> Result<()> {
             let events = fetch_events(&cli.collector, &cli.db, uid).await?;
             replay_session(events, speed)?;
         }
+        Commands::Live { session_id } => {
+            let uid = Uuid::parse_str(&session_id).context("Invalid session UUID format")?;
+            let collector_url = cli
+                .collector
+                .unwrap_or_else(|| "http://127.0.0.1:19532".to_string());
+            stream_live_session(&collector_url, uid).await?;
+        }
+        Commands::Kill { session_id } => {
+            let uid = Uuid::parse_str(&session_id).context("Invalid session UUID format")?;
+            let collector_url = cli
+                .collector
+                .unwrap_or_else(|| "http://127.0.0.1:19532".to_string());
+            kill_session(&collector_url, uid).await?;
+        }
         Commands::Dump { session_id } => {
             let uid = Uuid::parse_str(&session_id).context("Invalid session UUID format")?;
             let events = fetch_events(&cli.collector, &cli.db, uid).await?;
             for ev in events {
                 println!("{}", serde_json::to_string(&ev)?);
+            }
+        }
+        Commands::Verify { session_id } => {
+            let uid = Uuid::parse_str(&session_id).context("Invalid session UUID format")?;
+            verify_session(&cli.collector, &cli.db, uid).await?;
+        }
+        Commands::Tree { session_id } => {
+            let uid = Uuid::parse_str(&session_id).context("Invalid session UUID format")?;
+            let events = fetch_events(&cli.collector, &cli.db, uid).await?;
+            let execs: Vec<_> = events
+                .into_iter()
+                .filter_map(|e| match e {
+                    AuditEvent::ProcessExec(p) => Some(p),
+                    _ => None,
+                })
+                .collect();
+
+            if execs.is_empty() {
+                println!("No process execution events recorded for session {session_id}.");
+            } else {
+                let roots = ProcessTreeBuilder::build_tree(&execs);
+                println!("\n=== Process Tree Lineage (Session: {session_id}) ===");
+                println!("{}", ProcessTreeBuilder::render_ascii(&roots));
             }
         }
         Commands::Analyze {
@@ -99,9 +164,106 @@ async fn main() -> Result<()> {
             let prompt = SemanticSummarizer::build_llm_prompt(&report);
 
             println!("{prompt}");
+
+            // Prompt Drift & Injection Analysis
+            if !report.ai_prompts.is_empty() {
+                println!("\n### 🛡️ AI Prompt-to-Execution Drift Assessment:");
+                let executed_cmds: Vec<String> = events
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        AuditEvent::ProcessExec(p) => Some(p.argv.join(" ")),
+                        _ => None,
+                    })
+                    .collect();
+
+                for p in &report.ai_prompts {
+                    let drift = PromptDriftDetector::evaluate_drift(&p.prompt, &executed_cmds);
+                    let status = if drift.is_anomalous_drift {
+                        "⚠️ HIGH DRIFT / POTENTIAL INJECTION"
+                    } else {
+                        "✓ ALIGNED"
+                    };
+                    println!(
+                        "  * Prompt: \"{}\" -> Status: {} (Risk: {:.2})",
+                        p.prompt, status, drift.risk_score
+                    );
+                    for reason in &drift.reasons {
+                        println!("      - {}", reason);
+                    }
+                }
+            }
         }
     }
 
+    Ok(())
+}
+
+async fn stream_live_session(collector_url: &str, session_id: Uuid) -> Result<()> {
+    println!("=== Connecting to Live Session Stream (SSE): {session_id} ===");
+    let client = Client::new();
+    let resp = client
+        .get(format!("{collector_url}/api/v1/sessions/{session_id}/live"))
+        .send()
+        .await?;
+
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        if let Ok(bytes) = chunk {
+            let text = String::from_utf8_lossy(&bytes);
+            for line in text.lines() {
+                if let Some(data) = line.strip_prefix("data:") {
+                    if let Ok(event) = serde_json::from_str::<AuditEvent>(data.trim()) {
+                        if let AuditEvent::KeystrokeInput(k) = event {
+                            print!("{}", k.as_str_lossy());
+                            let _ = stdout().flush();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn kill_session(collector_url: &str, session_id: Uuid) -> Result<()> {
+    let client = Client::new();
+    let resp = client
+        .post(format!("{collector_url}/api/v1/sessions/{session_id}/kill"))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    println!("Force-kill status for {session_id}:");
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(())
+}
+
+async fn verify_session(
+    collector: &Option<String>,
+    db_path: &PathBuf,
+    session_id: Uuid,
+) -> Result<()> {
+    if let Some(url) = collector {
+        let client = Client::new();
+        let resp = client
+            .get(format!("{url}/api/v1/sessions/{session_id}/verify"))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        let store = AuditStore::new(db_path)?;
+        match store.verify_session_integrity(session_id) {
+            Ok(_) => {
+                println!("✓ Session {session_id}: Cryptographic hash chain verified. (No tampering detected)");
+            }
+            Err(e) => {
+                println!("✗ Session {session_id}: TAMPER DETECTED! {e}");
+            }
+        }
+    }
     Ok(())
 }
 

@@ -12,11 +12,17 @@ async fn test_e2e_agent_to_collector_pipeline() {
     let db_path = temp_dir.path().join("test_audit.db");
 
     let store = AuditStore::new(&db_path).unwrap();
+    let _server = CollectorServer::new(store.clone(), "127.0.0.1:0".parse().unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = listener.local_addr().unwrap();
 
+    let (event_tx, _) = tokio::sync::broadcast::channel(1024);
     let router = CollectorServer::build_router(argus_collector::server::AppState {
         store: store.clone(),
+        event_tx,
+        killed_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
     });
 
     // Spawn collector server in background task

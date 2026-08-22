@@ -16,6 +16,8 @@ zstd = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 bytes = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

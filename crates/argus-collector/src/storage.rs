@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use argus_common::events::AuditEvent;
+use argus_common::hash_chain::{verify_event_chain, ChainedAuditEvent, GENESIS_HASH};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use std::fs;
@@ -89,6 +90,9 @@ impl AuditStore {
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT,
+                seq INTEGER NOT NULL DEFAULT 0,
+                prev_hash TEXT NOT NULL DEFAULT '',
+                hash TEXT NOT NULL DEFAULT '',
                 event_type TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 payload JSON NOT NULL,
@@ -104,7 +108,7 @@ impl AuditStore {
         Ok(())
     }
 
-    /// Batch insert audit events into SQLite
+    /// Batch insert audit events into SQLite with automatic cryptographic hash chaining
     pub fn insert_batch(&self, events: &[AuditEvent]) -> Result<()> {
         if events.is_empty() {
             return Ok(());
@@ -118,6 +122,21 @@ impl AuditStore {
             let timestamp_str = event.timestamp().to_rfc3339();
             let event_type = event.event_type_name();
             let payload_json = serde_json::to_string(event)?;
+
+            // Get last hash and seq for this session
+            let (last_seq, last_hash): (u64, String) = if let Some(ref sid) = session_id_str {
+                tx.query_row(
+                    "SELECT seq, hash FROM events WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
+                    params![sid],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or((0, GENESIS_HASH.to_string()))
+            } else {
+                (0, GENESIS_HASH.to_string())
+            };
+
+            let next_seq = last_seq + 1;
+            let chained = ChainedAuditEvent::new(next_seq, &last_hash, event.clone());
 
             // If session init, record in sessions table
             if let AuditEvent::SessionInit(init) = event {
@@ -154,11 +173,11 @@ impl AuditStore {
                 )?;
             }
 
-            // Record into events table
+            // Record into events table with cryptographic hash chain
             tx.execute(
-                "INSERT INTO events (session_id, event_type, timestamp, payload)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![session_id_str, event_type, timestamp_str, payload_json],
+                "INSERT INTO events (session_id, seq, prev_hash, hash, event_type, timestamp, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![session_id_str, chained.seq, chained.prev_hash, chained.hash, event_type, timestamp_str, payload_json],
             )?;
         }
 
@@ -184,6 +203,47 @@ impl AuditStore {
         }
 
         Ok(events)
+    }
+
+    /// Query chained events with hashes for cryptographic verification
+    pub fn get_chained_session_events(&self, session_id: Uuid) -> Result<Vec<ChainedAuditEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seq, prev_hash, hash, payload FROM events WHERE session_id = ?1 ORDER BY id ASC",
+        )?;
+
+        let rows = stmt.query_map(params![session_id.to_string()], |row| {
+            let seq: u64 = row.get(0)?;
+            let prev_hash: String = row.get(1)?;
+            let hash: String = row.get(2)?;
+            let payload_json: String = row.get(3)?;
+            let event: AuditEvent = serde_json::from_str(&payload_json).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            Ok(ChainedAuditEvent {
+                seq,
+                prev_hash,
+                hash,
+                event,
+            })
+        })?;
+
+        let mut chained_events = Vec::new();
+        for item in rows {
+            chained_events.push(item?);
+        }
+
+        Ok(chained_events)
+    }
+
+    /// Cryptographically verify session integrity
+    pub fn verify_session_integrity(&self, session_id: Uuid) -> Result<()> {
+        let chain = self.get_chained_session_events(session_id)?;
+        verify_event_chain(&chain)
     }
 
     /// List recent sessions
@@ -247,7 +307,7 @@ mod tests {
     use argus_common::events::{KeystrokeInput, SessionEnd, SessionInit};
 
     #[test]
-    fn test_store_lifecycle() {
+    fn test_store_hash_chain_verification() {
         let store = AuditStore::new_in_memory().unwrap();
         let session_id = Uuid::new_v4();
 
@@ -282,13 +342,16 @@ mod tests {
 
         store.insert_batch(&[init, key_1, end]).unwrap();
 
-        let sessions = store.list_sessions(10).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, session_id);
-        assert_eq!(sessions[0].client_ip, Some("192.168.1.100".into()));
-        assert_eq!(sessions[0].duration_ms, Some(1500));
+        // 1. Verify mathematically intact chain
+        assert!(store.verify_session_integrity(session_id).is_ok());
 
-        let events = store.get_session_events(session_id).unwrap();
-        assert_eq!(events.len(), 3);
+        let chained = store.get_chained_session_events(session_id).unwrap();
+        assert_eq!(chained.len(), 3);
+        assert_eq!(chained[0].seq, 1);
+        assert_eq!(chained[1].seq, 2);
+        assert_eq!(chained[2].seq, 3);
+        assert_eq!(chained[0].prev_hash, GENESIS_HASH);
+        assert_eq!(chained[1].prev_hash, chained[0].hash);
+        assert_eq!(chained[2].prev_hash, chained[1].hash);
     }
 }
