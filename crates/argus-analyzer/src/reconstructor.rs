@@ -91,6 +91,56 @@ impl KeystrokeReconstructor {
         false
     }
 
+    /// Check if an extracted line is terminal emulator noise, DA inquiry response, or editor navigation spam
+    pub fn is_terminal_noise_or_navigation(trimmed: &str) -> bool {
+        if trimmed.is_empty() {
+            return true;
+        }
+
+        // 1. Terminal Device Attribute inquiry responses: [>64;2500;0c, [?64;1;2c, >64;2500;0c
+        if (trimmed.starts_with("[>")
+            || trimmed.starts_with('>')
+            || trimmed.starts_with("[?")
+            || trimmed.starts_with('?'))
+            && trimmed.ends_with('c')
+            && trimmed.chars().all(|c| {
+                c.is_ascii_digit() || c == ';' || c == '[' || c == '>' || c == '?' || c == 'c'
+            })
+        {
+            return true;
+        }
+
+        // 2. Repetitive single character navigation spam (e.g. jjjjjjjj, kkkkkk, hhhhh, llllll)
+        if trimmed.len() >= 4 {
+            let first_char = trimmed.chars().next().unwrap();
+            if trimmed.chars().all(|c| c == first_char) {
+                return true;
+            }
+            // Repetitive motion with trailing vim command (e.g. jjjjjjjjjjj:q)
+            if (first_char == 'j' || first_char == 'k' || first_char == 'h' || first_char == 'l')
+                && trimmed
+                    .trim_end_matches(":q")
+                    .trim_end_matches(":wq")
+                    .trim_end_matches(":x")
+                    .trim_end_matches(":q!")
+                    .chars()
+                    .all(|c| c == first_char)
+            {
+                return true;
+            }
+        }
+
+        // 3. Isolated TUI editor internal commands/motions (:wq, :q!, ggO, ZZ)
+        if matches!(
+            trimmed,
+            ":q" | ":wq" | ":w" | ":x" | ":q!" | ":w!" | "ZZ" | "ZQ" | "ggO" | "gg" | "G"
+        ) {
+            return true;
+        }
+
+        false
+    }
+
     /// Reconstruct a stream of audit events into clean chronological activities
     pub fn reconstruct(events: &[AuditEvent]) -> ReconstructedSession {
         let mut session = ReconstructedSession::default();
@@ -121,7 +171,9 @@ impl KeystrokeReconstructor {
                         let sanitized = Self::sanitize_terminal_text(&text);
                         for line in sanitized.lines() {
                             let trimmed = line.trim();
-                            if !trimmed.is_empty() {
+                            if !trimmed.is_empty()
+                                && !Self::is_terminal_noise_or_navigation(trimmed)
+                            {
                                 let is_ai =
                                     in_ai_session_mode || Self::is_ai_tool_invocation(trimmed);
                                 if is_ai {
@@ -223,7 +275,7 @@ impl KeystrokeReconstructor {
         in_ai_session_mode: bool,
     ) {
         let trimmed = buf.trim();
-        if !trimmed.is_empty() {
+        if !trimmed.is_empty() && !Self::is_terminal_noise_or_navigation(trimmed) {
             let ts = start_time.unwrap_or_else(Utc::now);
             let is_ai = in_ai_session_mode || Self::is_ai_tool_invocation(trimmed);
             if is_ai {
@@ -304,5 +356,50 @@ mod tests {
         assert_eq!(session.activities.len(), 1);
         assert!(session.has_ai_activity);
         assert!(session.activities[0].is_ai);
+    }
+
+    #[test]
+    fn test_editor_navigation_and_da_inquiry_filtering() {
+        let sid = Uuid::new_v4();
+        let events = vec![
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                1,
+                100,
+                b"vi ~/.ssh/config\r".to_vec(),
+                false,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                2,
+                200,
+                b"\x1b[>64;2500;0c\r".to_vec(),
+                false,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                3,
+                300,
+                b"jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj:q\r".to_vec(),
+                false,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(sid, 4, 400, b"ggO\r".to_vec(), false)),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                5,
+                500,
+                b"Host test-server  HostName 1.2.3.4  User root\n".to_vec(),
+                true,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(sid, 6, 600, b":wq\r".to_vec(), false)),
+        ];
+
+        let session = KeystrokeReconstructor::reconstruct(&events);
+        assert_eq!(session.activities.len(), 2);
+        assert_eq!(session.activities[0].content, "vi ~/.ssh/config");
+        assert_eq!(
+            session.activities[1].content,
+            "Host test-server  HostName 1.2.3.4  User root"
+        );
     }
 }

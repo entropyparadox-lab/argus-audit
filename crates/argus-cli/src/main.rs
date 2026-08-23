@@ -107,11 +107,11 @@ enum Commands {
         telegram_bot_token: Option<String>,
 
         /// Telegram Target Chat ID (default: -1004370762918)
-        #[arg(long, env = "ARGUS_TELEGRAM_CHAT_ID")]
+        #[arg(long, env = "ARGUS_TELEGRAM_CHAT_ID", allow_hyphen_values = true)]
         telegram_chat_id: Option<String>,
 
         /// Telegram Topic Thread ID (default: 6269)
-        #[arg(long, env = "ARGUS_TELEGRAM_THREAD_ID")]
+        #[arg(long, env = "ARGUS_TELEGRAM_THREAD_ID", allow_hyphen_values = true)]
         telegram_thread_id: Option<i64>,
 
         /// Idle timeout for regular shell sessions in minutes (default: 3)
