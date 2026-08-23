@@ -115,8 +115,11 @@ name = "argus-analyzer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-collector",
  "argus-common",
  "chrono",
+ "futures",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

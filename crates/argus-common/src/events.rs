@@ -76,6 +76,11 @@ impl KeystrokeInput {
         }
     }
 
+    pub fn with_timestamp(mut self, ts: DateTime<Utc>) -> Self {
+        self.timestamp = ts;
+        self
+    }
+
     /// Helper to get input as UTF-8 lossy string
     pub fn as_str_lossy(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.data)
