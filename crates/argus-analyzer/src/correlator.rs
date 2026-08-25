@@ -1,3 +1,4 @@
+use crate::reconstructor::{ActivityKind, KeystrokeReconstructor};
 use crate::rules::{AnomalyAlert, RuleEngine};
 use argus_common::events::{AuditEvent, PromptTrace, SessionInit};
 use chrono::{DateTime, Utc};
@@ -63,21 +64,6 @@ impl SessionCorrelator {
                 }
                 AuditEvent::KeystrokeInput(key) => {
                     total_input_bytes += key.byte_len as u64;
-                    let text = key.as_str_lossy();
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        let category = if key.is_paste {
-                            "clipboard_paste"
-                        } else {
-                            "user_input"
-                        };
-                        timeline.push(TimelineEntry {
-                            timestamp: key.timestamp,
-                            category: category.to_string(),
-                            content: trimmed.to_string(),
-                            alerts: event_alerts,
-                        });
-                    }
                 }
                 AuditEvent::ProcessExec(proc) => {
                     timeline.push(TimelineEntry {
@@ -104,7 +90,24 @@ impl SessionCorrelator {
             }
         }
 
-        // 2. Correlate AI Prompts that occurred within the session timeframe
+        // 2. Add cleanly reconstructed activities into timeline
+        let reconstructed = KeystrokeReconstructor::reconstruct(events);
+        for act in reconstructed.activities {
+            let category = match act.kind {
+                ActivityKind::Command => "command",
+                ActivityKind::Paste => "clipboard_paste",
+                ActivityKind::AiPrompt => "ai_prompt",
+                ActivityKind::InteractiveInput => "user_input",
+            };
+            timeline.push(TimelineEntry {
+                timestamp: act.timestamp,
+                category: category.to_string(),
+                content: act.content,
+                alerts: Vec::new(),
+            });
+        }
+
+        // 3. Correlate AI Prompts that occurred within the session timeframe
         let mut session_prompts = Vec::new();
         for prompt in prompts {
             session_prompts.push(prompt.clone());

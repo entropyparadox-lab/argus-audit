@@ -4,15 +4,19 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 static ANSI_ESCAPE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches ANSI escape sequences: CSI (\x1b[...), OSC (\x1b]...), DCS (\x1bP...), and single escapes
+    // Matches ANSI escape sequences: CSI (\x1b[...), OSC (\x1b]...), DCS (\x1bP...), APC/PM/SOS, and single escapes
     Regex::new(
         r"(?x)
-        \x1b\[[0-9;?*!$]*[a-zA-Z~] |  # CSI sequences (colors, cursor, focus, DA queries)
-        \x1b\][^\x07\x1b]*(\x07|\x1b\\) | # OSC sequences (window titles, OSC 52 clipboard)
-        \x1bP[^\x1b]*\x1b\\ |             # DCS sequences (device control / term responses)
-        \x1b[_^][^\x1b]*\x1b\\ |          # APC / PM sequences
-        \x1b[NnOo] |                      # Single escapes (SS2, SS3)
-        [\x00-\x06\x0b\x0c\x0e-\x1a\x1c-\x1f] # Control characters except \a, \b, \t, \n, \r
+        \x1b\[[0-9:;<=>?]*[\x20-\x2F]*[@-~] |       # CSI sequences (SGR mouse, colors, cursor, focus, DA/DSR queries, bracketed paste)
+        \x1b\][^\x07\x1b]*(?:\x07|\x1b\\)? |        # OSC sequences (window titles, OSC 52 clipboard, color palette)
+        \x1bP[^\x1b]*(?:\x1b\\)? |                  # DCS sequences (device control / term responses)
+        \x1b[_^X][^\x1b]*(?:\x1b\\)? |              # APC / PM / SOS sequences
+        \x1b[\x20-\x2F]*[\x30-\x7E] |               # 2-byte escape sequences (SS2/SS3, \x1bO[A-Z], \x1bM, etc.)
+        \x1b |                                      # Any dangling bare ESC
+        \[<[0-9;]+[Mm] |                            # Orphaned SGR mouse events without ESC
+        \[>[0-9;]+c |                               # Orphaned secondary DA without ESC
+        \[\?[0-9;]+[a-zA-Z] |                       # Orphaned private mode/DA/DSR without ESC
+        [\x00-\x06\x0b\x0c\x0e-\x1a\x1c-\x1f]       # Control characters except \a, \b, \t, \n, \r
     ",
     )
     .unwrap()
@@ -97,20 +101,32 @@ impl KeystrokeReconstructor {
             return true;
         }
 
-        // 1. Terminal Device Attribute inquiry responses: [>64;2500;0c, [?64;1;2c, >64;2500;0c
+        // 1. Terminal Device Attribute & Status inquiry responses: [>64;2500;0c, [?64;1;2c, >64;2500;0c, ?997;1n, 4;1008;1432t
         if (trimmed.starts_with("[>")
             || trimmed.starts_with('>')
             || trimmed.starts_with("[?")
-            || trimmed.starts_with('?'))
-            && trimmed.ends_with('c')
-            && trimmed.chars().all(|c| {
-                c.is_ascii_digit() || c == ';' || c == '[' || c == '>' || c == '?' || c == 'c'
-            })
+            || trimmed.starts_with('?')
+            || trimmed.starts_with("[<")
+            || trimmed.starts_with('<'))
+            && (trimmed.ends_with('c')
+                || trimmed.ends_with('n')
+                || trimmed.ends_with('t')
+                || trimmed.ends_with('R')
+                || trimmed.ends_with('M')
+                || trimmed.ends_with('m'))
         {
             return true;
         }
 
-        // 2. Repetitive single character navigation spam (e.g. jjjjjjjj, kkkkkk, hhhhh, llllll)
+        // 2. Orphaned SGR mouse tracking fragments (e.g. [<35;..., <35;...)
+        if trimmed.starts_with("[<")
+            || trimmed.starts_with('<')
+            || (trimmed.contains("[<") && (trimmed.ends_with('M') || trimmed.ends_with('m')))
+        {
+            return true;
+        }
+
+        // 3. Repetitive single character navigation spam (e.g. jjjjjjjj, kkkkkk, hhhhh, llllll)
         if trimmed.len() >= 4 {
             let first_char = trimmed.chars().next().unwrap();
             if trimmed.chars().all(|c| c == first_char) {
@@ -130,7 +146,7 @@ impl KeystrokeReconstructor {
             }
         }
 
-        // 3. Isolated TUI editor internal commands/motions (:wq, :q!, ggO, ZZ)
+        // 4. Isolated TUI editor internal commands/motions (:wq, :q!, ggO, ZZ)
         if matches!(
             trimmed,
             ":q" | ":wq" | ":w" | ":x" | ":q!" | ":w!" | "ZZ" | "ZQ" | "ggO" | "gg" | "G"
@@ -145,6 +161,7 @@ impl KeystrokeReconstructor {
     pub fn reconstruct(events: &[AuditEvent]) -> ReconstructedSession {
         let mut session = ReconstructedSession::default();
         let mut line_buffer = String::new();
+        let mut raw_bytes_buffer = Vec::new();
         let mut line_start_time = None;
         let mut in_ai_session_mode = false;
 
@@ -158,7 +175,21 @@ impl KeystrokeReconstructor {
                     session.last_activity = Some(key.timestamp);
 
                     if key.is_paste {
-                        // Flush any pending typed buffer first
+                        // Flush any pending raw byte buffer first
+                        if !raw_bytes_buffer.is_empty() {
+                            let text = String::from_utf8_lossy(&raw_bytes_buffer);
+                            Self::process_typed_chars(
+                                &text,
+                                &mut line_buffer,
+                                &mut line_start_time,
+                                key.timestamp,
+                                &mut session,
+                                in_ai_session_mode,
+                            );
+                            raw_bytes_buffer.clear();
+                        }
+
+                        // Flush any pending typed buffer
                         Self::flush_line_buffer(
                             &mut line_buffer,
                             &mut line_start_time,
@@ -190,28 +221,35 @@ impl KeystrokeReconstructor {
                             }
                         }
                     } else {
-                        // Interactive typing char by char
-                        let raw_chunk = key.as_str_lossy();
-                        let sanitized = Self::sanitize_terminal_text(&raw_chunk);
+                        // Accumulate raw keystroke bytes to handle UTF-8 multibyte boundary across reads
+                        raw_bytes_buffer.extend_from_slice(&key.data);
 
-                        for ch in sanitized.chars() {
-                            if line_start_time.is_none() {
-                                line_start_time = Some(key.timestamp);
+                        let (valid_str, remaining_bytes) = match std::str::from_utf8(&raw_bytes_buffer) {
+                            Ok(s) => (s.to_string(), Vec::new()),
+                            Err(e) => {
+                                let valid_up_to = e.valid_up_to();
+                                let valid_str = match std::str::from_utf8(&raw_bytes_buffer[..valid_up_to]) {
+                                    Ok(s) => s.to_string(),
+                                    Err(_) => String::new(),
+                                };
+                                let rem = match e.error_len() {
+                                    Some(err_len) => raw_bytes_buffer[valid_up_to + err_len..].to_vec(),
+                                    None => raw_bytes_buffer[valid_up_to..].to_vec(),
+                                };
+                                (valid_str, rem)
                             }
+                        };
+                        raw_bytes_buffer = remaining_bytes;
 
-                            if ch == '\r' || ch == '\n' {
-                                Self::flush_line_buffer(
-                                    &mut line_buffer,
-                                    &mut line_start_time,
-                                    &mut session,
-                                    in_ai_session_mode,
-                                );
-                            } else if ch == '\x7f' || ch == '\x08' {
-                                // Backspace
-                                line_buffer.pop();
-                            } else if !ch.is_control() {
-                                line_buffer.push(ch);
-                            }
+                        if !valid_str.is_empty() {
+                            Self::process_typed_chars(
+                                &valid_str,
+                                &mut line_buffer,
+                                &mut line_start_time,
+                                key.timestamp,
+                                &mut session,
+                                in_ai_session_mode,
+                            );
                         }
                     }
                 }
@@ -246,6 +284,18 @@ impl KeystrokeReconstructor {
                 }
                 AuditEvent::SessionEnd(end) => {
                     session.last_activity = Some(end.timestamp);
+                    if !raw_bytes_buffer.is_empty() {
+                        let text = String::from_utf8_lossy(&raw_bytes_buffer);
+                        Self::process_typed_chars(
+                            &text,
+                            &mut line_buffer,
+                            &mut line_start_time,
+                            end.timestamp,
+                            &mut session,
+                            in_ai_session_mode,
+                        );
+                        raw_bytes_buffer.clear();
+                    }
                     Self::flush_line_buffer(
                         &mut line_buffer,
                         &mut line_start_time,
@@ -258,6 +308,18 @@ impl KeystrokeReconstructor {
         }
 
         // Final flush if any uncommitted typed buffer remains
+        if !raw_bytes_buffer.is_empty() {
+            let text = String::from_utf8_lossy(&raw_bytes_buffer);
+            Self::process_typed_chars(
+                &text,
+                &mut line_buffer,
+                &mut line_start_time,
+                session.last_activity.unwrap_or_else(Utc::now),
+                &mut session,
+                in_ai_session_mode,
+            );
+            raw_bytes_buffer.clear();
+        }
         Self::flush_line_buffer(
             &mut line_buffer,
             &mut line_start_time,
@@ -266,6 +328,36 @@ impl KeystrokeReconstructor {
         );
 
         session
+    }
+
+    fn process_typed_chars(
+        raw_text: &str,
+        line_buffer: &mut String,
+        line_start_time: &mut Option<DateTime<Utc>>,
+        timestamp: DateTime<Utc>,
+        session: &mut ReconstructedSession,
+        in_ai_session_mode: bool,
+    ) {
+        let sanitized = Self::sanitize_terminal_text(raw_text);
+        for ch in sanitized.chars() {
+            if line_start_time.is_none() {
+                *line_start_time = Some(timestamp);
+            }
+
+            if ch == '\r' || ch == '\n' {
+                Self::flush_line_buffer(
+                    line_buffer,
+                    line_start_time,
+                    session,
+                    in_ai_session_mode,
+                );
+            } else if ch == '\x7f' || ch == '\x08' {
+                // Backspace
+                line_buffer.pop();
+            } else if !ch.is_control() {
+                line_buffer.push(ch);
+            }
+        }
     }
 
     fn flush_line_buffer(
@@ -401,5 +493,91 @@ mod tests {
             session.activities[1].content,
             "Host test-server  HostName 1.2.3.4  User root"
         );
+    }
+
+    #[test]
+    fn test_sgr_mouse_and_korean_typing_reconstruction() {
+        let sid = Uuid::new_v4();
+        let events = vec![
+            // 1. Terminal status & SGR mouse movements
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                1,
+                100,
+                b"\x1b[?1;2c\x1b[>0;276;0c\x1b[<35;13;1M\x1b[<35;13;3M".to_vec(),
+                false,
+            )),
+            // 2. Korean typing with backspaces and interleaved mouse movements
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                2,
+                200,
+                "제".as_bytes().to_vec(),
+                false,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                3,
+                300,
+                "가 ".as_bytes().to_vec(),
+                false,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                4,
+                400,
+                "QR 코드".as_bytes().to_vec(),
+                false,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                5,
+                500,
+                b"\x1b[<35;47;21M\x1b[<35;47;22M".to_vec(),
+                false,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                6,
+                600,
+                " 확인 요청\r".as_bytes().to_vec(),
+                false,
+            )),
+            // 3. Trailing mouse movements after enter
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                7,
+                700,
+                b"\x1b[<35;131;45M\x1b[<35;129;46M".to_vec(),
+                false,
+            )),
+        ];
+
+        let session = KeystrokeReconstructor::reconstruct(&events);
+        assert_eq!(session.activities.len(), 1);
+        assert_eq!(session.activities[0].content, "제가 QR 코드 확인 요청");
+    }
+
+    #[test]
+    fn test_split_multibyte_korean_utf8_chunks() {
+        let sid = Uuid::new_v4();
+        let korean_str = "한글입력";
+        let bytes = korean_str.as_bytes(); // 12 bytes (4 chars * 3 bytes)
+
+        // Split across boundary (e.g. 2 bytes in chunk 1, 1 byte in chunk 2)
+        let chunk1 = bytes[..2].to_vec();
+        let chunk2 = bytes[2..7].to_vec();
+        let mut chunk3 = bytes[7..].to_vec();
+        chunk3.push(b'\n');
+
+        let events = vec![
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(sid, 1, 100, chunk1, false)),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(sid, 2, 200, chunk2, false)),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(sid, 3, 300, chunk3, false)),
+        ];
+
+        let session = KeystrokeReconstructor::reconstruct(&events);
+        assert_eq!(session.activities.len(), 1);
+        assert_eq!(session.activities[0].content, "한글입력");
     }
 }

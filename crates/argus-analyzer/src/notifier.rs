@@ -139,16 +139,19 @@ impl NotificationReport {
             let item = act.content.trim();
             if !item.is_empty() && !seen.contains(item) {
                 seen.insert(item.to_string());
-                let short_cmd = if item.len() > 100 {
-                    format!("{}...", &item[..100])
+                let short_cmd = if item.chars().count() > 100 {
+                    let truncated: String = item.chars().take(100).collect();
+                    format!("{truncated}...")
                 } else {
                     item.to_string()
                 };
 
+                let safe_cmd = short_cmd.replace('`', "'");
+
                 if act.is_ai {
-                    key_activities.push(format!("🤖 Claude Code: \"{}\"", short_cmd));
+                    key_activities.push(format!("🤖 Claude Code: \"{}\"", safe_cmd));
                 } else {
-                    key_activities.push(format!("`{}`", short_cmd));
+                    key_activities.push(format!("`{}`", safe_cmd));
                 }
 
                 if key_activities.len() >= 8 {
