@@ -35,6 +35,10 @@ enum Commands {
         /// Automatically mask in-flight credentials (AWS, OpenAI, Private Keys) before transmission
         #[arg(long, env = "ARGUS_MASK_SECRETS", default_value_t = true)]
         mask_secrets: bool,
+
+        /// Optional command to execute instead of interactive shell (e.g. for SSH ForceCommand)
+        #[arg(last = true)]
+        command: Vec<String>,
     },
 }
 
@@ -49,11 +53,17 @@ fn main() -> anyhow::Result<()> {
             collector,
             spool,
             mask_secrets,
+            command,
         } => {
             let session_id = Uuid::new_v4();
-            let shell_path = shell
-                .or_else(|| std::env::var("SHELL").ok())
-                .unwrap_or_else(|| "/bin/bash".to_string());
+            let final_command = if command.is_empty() {
+                let shell_path = shell
+                    .or_else(|| std::env::var("SHELL").ok())
+                    .unwrap_or_else(|| "/bin/bash".to_string());
+                vec![shell_path]
+            } else {
+                command
+            };
 
             let (tx, rx) = channel();
 
@@ -71,7 +81,7 @@ fn main() -> anyhow::Result<()> {
             });
 
             // Run PTY foreground loop with optional in-flight secret masking
-            let runner = PtyRunner::new(session_id, shell_path, tx, mask_secrets);
+            let runner = PtyRunner::new(session_id, final_command, tx, mask_secrets);
             let exit_status = runner.run(init_event)?;
 
             // Wait for uploader to finish flushing remaining events
