@@ -1,4 +1,5 @@
 use crate::reconstructor::{KeystrokeReconstructor, ReconstructedSession};
+use crate::rules::RuleEngine;
 use argus_common::events::{AuditEvent, SessionEnd};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -274,8 +275,16 @@ impl AiAwareTriggerEvaluator {
             return (true, Some("No new events recorded".to_string()));
         }
 
-        // Filter 1: Zero commands and minimal input bytes
-        if session.total_commands == 0 && session.total_input_bytes < config.min_input_bytes {
+        // Security bypass: Any security anomalies detected by RuleEngine must NEVER be suppressed as noise
+        let has_security_alerts = events
+            .iter()
+            .any(|e| !RuleEngine::inspect_event(e).is_empty());
+        if has_security_alerts {
+            return (false, None);
+        }
+
+        // Filter 1: Zero reconstructed commands or empty activities (e.g. bare connection, ANSI focus in/out, terminal query pings)
+        if session.total_commands == 0 || session.activities.is_empty() {
             return (
                 true,
                 Some(format!(
@@ -285,16 +294,18 @@ impl AiAwareTriggerEvaluator {
             );
         }
 
-        // Filter 2: Single trivial command (e.g. just `exit`, `uptime`) with short duration
-        if session.total_commands == 1 && session.activities.len() == 1 {
-            let cmd = session.activities[0].content.to_lowercase();
+        // Filter 2: All reconstructed commands are trivial commands (e.g. `exit`, `logout`, `clear`, `w`, `uptime`)
+        let all_trivial = session.activities.iter().all(|act| {
+            let cmd = act.content.trim().to_lowercase();
             let first_token = cmd.split_whitespace().next().unwrap_or("");
-            if config.trivial_commands.iter().any(|t| t == first_token) {
-                return (
-                    true,
-                    Some(format!("Suppressed trivial command: \"{}\"", cmd)),
-                );
-            }
+            config.trivial_commands.iter().any(|t| t == first_token)
+        });
+
+        if all_trivial {
+            return (
+                true,
+                Some("Suppressed trivial maintenance/navigation commands".to_string()),
+            );
         }
 
         (false, None)
@@ -404,5 +415,60 @@ mod tests {
 
         assert!(!eval.should_notify);
         assert!(eval.is_noise);
+    }
+
+    #[test]
+    fn test_noise_filter_suppresses_focus_and_zero_commands() {
+        let sid = Uuid::new_v4();
+        let config = TriggerConfig::default();
+        let start = Utc::now() - Duration::minutes(10);
+
+        // Terminal focus-in sequence (\x1b[I = 3 bytes) without any command
+        let focus_event = AuditEvent::KeystrokeInput(
+            KeystrokeInput::new(sid, 1, 100, b"\x1b[I".to_vec(), false).with_timestamp(start),
+        );
+
+        let eval = AiAwareTriggerEvaluator::evaluate(
+            sid,
+            start,
+            &[focus_event],
+            0,
+            start + Duration::minutes(5),
+            &config,
+        );
+
+        assert!(!eval.should_notify);
+        assert!(eval.is_noise);
+    }
+
+    #[test]
+    fn test_security_alert_not_suppressed_even_without_command() {
+        let sid = Uuid::new_v4();
+        let config = TriggerConfig::default();
+        let start = Utc::now() - Duration::minutes(10);
+
+        // Raw paste containing AWS Secret Key without executing newline
+        let secret_paste = AuditEvent::KeystrokeInput(
+            KeystrokeInput::new(
+                sid,
+                1,
+                100,
+                b"export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_vec(),
+                true,
+            )
+            .with_timestamp(start),
+        );
+
+        let eval = AiAwareTriggerEvaluator::evaluate(
+            sid,
+            start,
+            &[secret_paste],
+            0,
+            start + Duration::minutes(5),
+            &config,
+        );
+
+        assert!(eval.should_notify);
+        assert!(!eval.is_noise);
     }
 }

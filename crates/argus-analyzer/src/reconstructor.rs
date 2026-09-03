@@ -189,56 +189,42 @@ impl KeystrokeReconstructor {
                             raw_bytes_buffer.clear();
                         }
 
-                        // Flush any pending typed buffer
-                        Self::flush_line_buffer(
+                        // Process pasted block through process_typed_chars so inline pastes
+                        // (and IME composition bracketed paste from mobile/Termius)
+                        // accumulate into line_buffer until a newline (\n or \r) occurs.
+                        let text = key.as_str_lossy();
+                        Self::process_typed_chars(
+                            &text,
                             &mut line_buffer,
                             &mut line_start_time,
+                            key.timestamp,
                             &mut session,
                             in_ai_session_mode,
                         );
-
-                        // Process pasted block
-                        let text = key.as_str_lossy();
-                        let sanitized = Self::sanitize_terminal_text(&text);
-                        for line in sanitized.lines() {
-                            let trimmed = line.trim();
-                            if !trimmed.is_empty()
-                                && !Self::is_terminal_noise_or_navigation(trimmed)
-                            {
-                                let is_ai =
-                                    in_ai_session_mode || Self::is_ai_tool_invocation(trimmed);
-                                if is_ai {
-                                    session.has_ai_activity = true;
-                                    in_ai_session_mode = true;
-                                }
-                                session.total_commands += 1;
-                                session.activities.push(ReconstructedActivity {
-                                    timestamp: key.timestamp,
-                                    content: trimmed.to_string(),
-                                    kind: ActivityKind::Paste,
-                                    is_ai,
-                                });
-                            }
-                        }
                     } else {
                         // Accumulate raw keystroke bytes to handle UTF-8 multibyte boundary across reads
                         raw_bytes_buffer.extend_from_slice(&key.data);
 
-                        let (valid_str, remaining_bytes) = match std::str::from_utf8(&raw_bytes_buffer) {
-                            Ok(s) => (s.to_string(), Vec::new()),
-                            Err(e) => {
-                                let valid_up_to = e.valid_up_to();
-                                let valid_str = match std::str::from_utf8(&raw_bytes_buffer[..valid_up_to]) {
-                                    Ok(s) => s.to_string(),
-                                    Err(_) => String::new(),
-                                };
-                                let rem = match e.error_len() {
-                                    Some(err_len) => raw_bytes_buffer[valid_up_to + err_len..].to_vec(),
-                                    None => raw_bytes_buffer[valid_up_to..].to_vec(),
-                                };
-                                (valid_str, rem)
-                            }
-                        };
+                        let (valid_str, remaining_bytes) =
+                            match std::str::from_utf8(&raw_bytes_buffer) {
+                                Ok(s) => (s.to_string(), Vec::new()),
+                                Err(e) => {
+                                    let valid_up_to = e.valid_up_to();
+                                    let valid_str =
+                                        match std::str::from_utf8(&raw_bytes_buffer[..valid_up_to])
+                                        {
+                                            Ok(s) => s.to_string(),
+                                            Err(_) => String::new(),
+                                        };
+                                    let rem = match e.error_len() {
+                                        Some(err_len) => {
+                                            raw_bytes_buffer[valid_up_to + err_len..].to_vec()
+                                        }
+                                        None => raw_bytes_buffer[valid_up_to..].to_vec(),
+                                    };
+                                    (valid_str, rem)
+                                }
+                            };
                         raw_bytes_buffer = remaining_bytes;
 
                         if !valid_str.is_empty() {
@@ -345,12 +331,7 @@ impl KeystrokeReconstructor {
             }
 
             if ch == '\r' || ch == '\n' {
-                Self::flush_line_buffer(
-                    line_buffer,
-                    line_start_time,
-                    session,
-                    in_ai_session_mode,
-                );
+                Self::flush_line_buffer(line_buffer, line_start_time, session, in_ai_session_mode);
             } else if ch == '\x7f' || ch == '\x08' {
                 // Backspace
                 line_buffer.pop();
@@ -579,5 +560,47 @@ mod tests {
         let session = KeystrokeReconstructor::reconstruct(&events);
         assert_eq!(session.activities.len(), 1);
         assert_eq!(session.activities[0].content, "한글입력");
+    }
+
+    #[test]
+    fn test_termius_korean_ime_bracketed_paste_reconstruction() {
+        let sid = Uuid::new_v4();
+        // Simulates Termius sending each Korean syllable wrapped in bracketed paste (\x1b[200~ ... \x1b[201~)
+        let events = vec![
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                1,
+                100,
+                b"\x1b[200~\xeb\xb2\x84\x1b[201~".to_vec(), // "버"
+                true,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                2,
+                200,
+                b"\x1b[200~\xec\x8a\xa4\x1b[201~".to_vec(), // "스"
+                true,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(sid, 3, 300, b" ".to_vec(), false)),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                4,
+                400,
+                b"\x1b[200~\xeb\x8f\x84\x1b[201~".to_vec(), // "도"
+                true,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(
+                sid,
+                5,
+                500,
+                b"\x1b[200~\xec\xb0\xa9\x1b[201~".to_vec(), // "착"
+                true,
+            )),
+            AuditEvent::KeystrokeInput(KeystrokeInput::new(sid, 6, 600, b"\r".to_vec(), false)),
+        ];
+
+        let session = KeystrokeReconstructor::reconstruct(&events);
+        assert_eq!(session.activities.len(), 1);
+        assert_eq!(session.activities[0].content, "버스 도착");
     }
 }

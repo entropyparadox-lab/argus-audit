@@ -1,3 +1,4 @@
+use crate::operator::OperatorRegistry;
 use crate::reconstructor::ReconstructedActivity;
 use crate::rules::RuleEngine;
 use crate::trigger::{SessionType, TriggerReason};
@@ -61,6 +62,7 @@ pub struct NotificationReport {
     pub hostname: String,
     pub username: String,
     pub client_ip: String,
+    pub ssh_key_fingerprint: Option<String>,
     pub ssh_key_comment: Option<String>,
     pub session_type: SessionType,
     pub trigger_reason: TriggerReason,
@@ -94,6 +96,7 @@ impl NotificationReport {
         let client_ip = identity
             .and_then(|i| i.client_ip.clone())
             .unwrap_or_else(|| "local".to_string());
+        let ssh_key_fingerprint = identity.and_then(|i| i.ssh_key_fingerprint.clone());
         let ssh_key_comment = identity.and_then(|i| i.ssh_key_comment.clone());
 
         let start_time = activities
@@ -165,6 +168,7 @@ impl NotificationReport {
             hostname,
             username,
             client_ip,
+            ssh_key_fingerprint,
             ssh_key_comment,
             session_type,
             trigger_reason,
@@ -189,13 +193,50 @@ impl NotificationReport {
         lines.push("🛡️ *[Argus Audit] 작업 완료 알림*".to_string());
         lines.push("".to_string());
 
-        let ssh_meta = if let Some(ref comment) = self.ssh_key_comment {
-            format!(
-                "• *작업자:* `{}` (`{}` / IP: `{}`)",
-                self.username, comment, self.client_ip
-            )
-        } else {
-            format!("• *작업자:* `{}` (IP: `{}`)", self.username, self.client_ip)
+        let operator_name = OperatorRegistry::resolve_operator_name(
+            &self.username,
+            self.ssh_key_comment.as_deref(),
+            self.ssh_key_fingerprint.as_deref(),
+        );
+
+        let ssh_meta = match (
+            operator_name,
+            &self.ssh_key_comment,
+            &self.ssh_key_fingerprint,
+        ) {
+            (Some(name), Some(comment), _) => {
+                format!(
+                    "• *작업자:* `{}` ({} <`{}`> / IP: `{}`)",
+                    self.username, name, comment, self.client_ip
+                )
+            }
+            (Some(name), None, Some(fp)) => {
+                format!(
+                    "• *작업자:* `{}` ({} <`{}`> / IP: `{}`)",
+                    self.username, name, fp, self.client_ip
+                )
+            }
+            (Some(name), None, None) => {
+                format!(
+                    "• *작업자:* `{}` ({} / IP: `{}`)",
+                    self.username, name, self.client_ip
+                )
+            }
+            (None, Some(comment), _) => {
+                format!(
+                    "• *작업자:* `{}` (`{}` / IP: `{}`)",
+                    self.username, comment, self.client_ip
+                )
+            }
+            (None, None, Some(fp)) => {
+                format!(
+                    "• *작업자:* `{}` (`{}` / IP: `{}`)",
+                    self.username, fp, self.client_ip
+                )
+            }
+            (None, None, None) => {
+                format!("• *작업자:* `{}` (IP: `{}`)", self.username, self.client_ip)
+            }
         };
 
         lines.push(format!("• *서버:* `{}`", self.hostname));
@@ -253,6 +294,11 @@ impl TelegramNotifier {
         config: &TelegramConfig,
         report: &NotificationReport,
     ) -> Result<(), String> {
+        // Defensive check: Do not dispatch empty notifications if there are no activities, no alerts, and no tampering
+        if report.key_activities.is_empty() && report.alert_count == 0 && !report.is_tampered {
+            return Ok(());
+        }
+
         let bot_token = match &config.bot_token {
             Some(t) if !t.is_empty() => t,
             _ => {

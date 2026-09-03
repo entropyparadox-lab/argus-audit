@@ -75,8 +75,15 @@ impl SessionWatcher {
                 );
 
                 if !self.dry_run {
-                    // Send to Telegram
-                    if let Err(e) =
+                    if report.key_activities.is_empty()
+                        && report.alert_count == 0
+                        && !report.is_tampered
+                    {
+                        info!(
+                            "Skipping notification dispatch for {} (0 activities, 0 alerts)",
+                            s.session_id
+                        );
+                    } else if let Err(e) =
                         TelegramNotifier::send_report(&self.telegram_config, &report).await
                     {
                         error!(
