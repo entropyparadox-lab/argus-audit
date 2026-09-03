@@ -99,11 +99,23 @@ impl AuditStore {
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
 
+            CREATE TABLE IF NOT EXISTS session_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                last_notified_seq INTEGER NOT NULL DEFAULT 0,
+                notified_at TEXT NOT NULL,
+                trigger_reason TEXT NOT NULL,
+                session_type TEXT NOT NULL,
+                summary_text TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
             CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
             CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
             CREATE INDEX IF NOT EXISTS idx_sessions_client_ip ON sessions(client_ip);
-            CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);",
+            CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);
+            CREATE INDEX IF NOT EXISTS idx_notifications_session ON session_notifications(session_id);",
         )?;
         Ok(())
     }
@@ -282,6 +294,82 @@ impl AuditStore {
 
         Ok(list)
     }
+
+    /// Query the last recorded notification checkpoint sequence for a given session
+    pub fn get_last_notified_seq(&self, session_id: Uuid) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let seq: Option<u64> = conn
+            .query_row(
+                "SELECT last_notified_seq FROM session_notifications WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(seq.unwrap_or(0))
+    }
+
+    /// Record a notification checkpoint
+    pub fn record_notification(
+        &self,
+        session_id: Uuid,
+        last_notified_seq: u64,
+        trigger_reason: &str,
+        session_type: &str,
+        summary_text: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session_notifications (session_id, last_notified_seq, notified_at, trigger_reason, session_type, summary_text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                session_id.to_string(),
+                last_notified_seq,
+                Utc::now().to_rfc3339(),
+                trigger_reason,
+                session_type,
+                summary_text,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Query events since a specific sequence number
+    pub fn get_session_events_since(
+        &self,
+        session_id: Uuid,
+        since_seq: u64,
+    ) -> Result<Vec<AuditEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT payload FROM events WHERE session_id = ?1 AND seq > ?2 ORDER BY seq ASC",
+        )?;
+
+        let rows = stmt.query_map(params![session_id.to_string(), since_seq], |row| {
+            let json_str: String = row.get(0)?;
+            Ok(json_str)
+        })?;
+
+        let mut events = Vec::new();
+        for json_str in rows {
+            let event: AuditEvent = serde_json::from_str(&json_str?)?;
+            events.push(event);
+        }
+
+        Ok(events)
+    }
+
+    /// Query the highest sequence number for a session
+    pub fn get_latest_event_seq(&self, session_id: Uuid) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let seq: Option<u64> = conn
+            .query_row(
+                "SELECT seq FROM events WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(seq.unwrap_or(0))
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -351,5 +439,40 @@ mod tests {
         assert_eq!(chained[0].prev_hash, GENESIS_HASH);
         assert_eq!(chained[1].prev_hash, chained[0].hash);
         assert_eq!(chained[2].prev_hash, chained[1].hash);
+    }
+
+    #[test]
+    fn test_store_notifications_checkpoint() {
+        let store = AuditStore::new_in_memory().unwrap();
+        let session_id = Uuid::new_v4();
+
+        let init = AuditEvent::SessionInit(SessionInit {
+            session_id,
+            timestamp: Utc::now(),
+            hostname: "test-host".into(),
+            username: "ubuntu".into(),
+            tty: "pts/0".into(),
+            client_ip: Some("192.168.1.100".into()),
+            client_port: Some(44231),
+            ssh_key_fingerprint: None,
+            ssh_key_comment: None,
+            env_context: None,
+        });
+
+        store.insert_batch(&[init]).unwrap();
+
+        assert_eq!(store.get_last_notified_seq(session_id).unwrap(), 0);
+
+        store
+            .record_notification(
+                session_id,
+                5,
+                "IdleTimeout (15m)",
+                "AiSession",
+                "Refactored auth module",
+            )
+            .unwrap();
+
+        assert_eq!(store.get_last_notified_seq(session_id).unwrap(), 5);
     }
 }

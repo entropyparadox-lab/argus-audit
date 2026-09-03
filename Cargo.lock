@@ -94,6 +94,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argus-common",
+ "base64",
  "bytes",
  "chrono",
  "clap",
@@ -103,6 +104,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -115,8 +118,11 @@ name = "argus-analyzer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-collector",
  "argus-common",
  "chrono",
+ "futures",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
@@ -180,6 +186,7 @@ name = "argus-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "chrono",
  "hex",

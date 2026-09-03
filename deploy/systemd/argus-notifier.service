@@ -1,0 +1,18 @@
+[Unit]
+Description=Argus Audit AI-Aware Session Notifier Daemon
+After=network.target argus-collector.service
+Wants=argus-collector.service
+
+[Service]
+Type=simple
+User=cycorld
+WorkingDirectory=/home/cycorld/.local/share/argus
+ExecStart=/home/cycorld/bin/argus --db /home/cycorld/.local/share/argus/audit.db notify --daemon --interval 15 --shell-idle-mins 3 --ai-idle-mins 15
+Restart=always
+RestartSec=5s
+Environment=RUST_LOG=info
+Environment=ARGUS_TELEGRAM_CHAT_ID=-1004370762918
+Environment=ARGUS_TELEGRAM_THREAD_ID=6269
+
+[Install]
+WantedBy=default.target
