@@ -3,7 +3,7 @@ use argus_common::events::{AuditEvent, KeystrokeInput, SessionEnd, SessionInit};
 use nix::pty::{openpty, Winsize};
 use nix::sys::select::{select, FdSet};
 use nix::sys::signal::{self, SigHandler, Signal};
-use nix::sys::termios::{self, SetArg, Termios};
+use nix::sys::termios::{self, LocalFlags, SetArg, Termios};
 use nix::sys::wait::waitpid;
 use nix::unistd::{close, dup2, execvp, fork, read, write, ForkResult, Pid};
 use std::ffi::CString;
@@ -150,6 +150,8 @@ impl PtyRunner {
         let mut total_bytes = 0u64;
         let mut in_buf = [0u8; 4096];
         let mut out_buf = [0u8; 16384];
+        let mut in_password_mode = false;
+        let mut recent_child_output = Vec::new();
 
         loop {
             // Check for window resize
@@ -177,26 +179,61 @@ impl PtyRunner {
                             Ok(n) => {
                                 let elapsed = start_time.elapsed().as_millis() as u64;
                                 let raw_slice = in_buf[..n].to_vec();
-                                let is_paste = n > 16 || raw_slice.starts_with(b"\x1b[200~");
+
+                                // Check if child process (e.g. sudo, su, getpass) is in password input mode
+                                if Self::is_password_input_mode(master_fd, &recent_child_output) {
+                                    in_password_mode = true;
+                                }
 
                                 in_seq += 1;
                                 total_bytes += n as u64;
 
-                                // Redact in-flight secrets before queuing event if enabled
-                                let recorded_slice = if self.mask_secrets {
-                                    SecretRedactor::redact_bytes(&raw_slice)
-                                } else {
-                                    raw_slice.clone()
-                                };
+                                if in_password_mode {
+                                    let has_enter =
+                                        raw_slice.contains(&b'\r') || raw_slice.contains(&b'\n');
+                                    let has_ctrl_c = raw_slice.contains(&b'\x03');
 
-                                let event = KeystrokeInput::new(
-                                    self.session_id,
-                                    in_seq,
-                                    elapsed,
-                                    recorded_slice,
-                                    is_paste,
-                                );
-                                let _ = self.event_tx.send(AuditEvent::KeystrokeInput(event));
+                                    if has_enter {
+                                        let event = KeystrokeInput::new(
+                                            self.session_id,
+                                            in_seq,
+                                            elapsed,
+                                            b"[REDACTED:PASSWORD]\r\n".to_vec(),
+                                            false,
+                                        );
+                                        let _ =
+                                            self.event_tx.send(AuditEvent::KeystrokeInput(event));
+                                        in_password_mode = false;
+                                        recent_child_output.clear();
+                                    } else if has_ctrl_c {
+                                        let event = KeystrokeInput::new(
+                                            self.session_id,
+                                            in_seq,
+                                            elapsed,
+                                            b"^C\n".to_vec(),
+                                            false,
+                                        );
+                                        let _ =
+                                            self.event_tx.send(AuditEvent::KeystrokeInput(event));
+                                        in_password_mode = false;
+                                        recent_child_output.clear();
+                                    }
+                                    // Sensitive password characters typed before Enter are DISCARDED from audit logging.
+                                } else {
+                                    let is_paste = n > 16 || raw_slice.starts_with(b"\x1b[200~");
+
+                                    // Redact in-flight secrets (API keys, private keys, AWS tokens)
+                                    let recorded_slice = SecretRedactor::redact_bytes(&raw_slice);
+
+                                    let event = KeystrokeInput::new(
+                                        self.session_id,
+                                        in_seq,
+                                        elapsed,
+                                        recorded_slice,
+                                        is_paste,
+                                    );
+                                    let _ = self.event_tx.send(AuditEvent::KeystrokeInput(event));
+                                }
 
                                 // Forward original stdin directly to child PTY master (unaltered execution)
                                 let _ =
@@ -211,6 +248,13 @@ impl PtyRunner {
                         match read(master_fd, &mut out_buf) {
                             Ok(0) => break, // Child closed stdout/stderr
                             Ok(n) => {
+                                // Track recent child output to detect password prompts (ring buffer 1024 bytes)
+                                recent_child_output.extend_from_slice(&out_buf[..n]);
+                                if recent_child_output.len() > 1024 {
+                                    let drain_count = recent_child_output.len() - 1024;
+                                    recent_child_output.drain(..drain_count);
+                                }
+
                                 let _ = write(
                                     unsafe { BorrowedFd::borrow_raw(stdout_fd) },
                                     &out_buf[..n],
@@ -243,5 +287,97 @@ impl PtyRunner {
         let _ = self.event_tx.send(AuditEvent::SessionEnd(end_event));
 
         Ok(exit_code.unwrap_or(0))
+    }
+
+    /// Check if the child PTY is currently requesting a password (ECHO disabled)
+    fn is_password_input_mode(master_fd: RawFd, recent_output: &[u8]) -> bool {
+        // 1. Primary OS check: inspect slave termios state via master_fd
+        let termios_res = termios::tcgetattr(unsafe { BorrowedFd::borrow_raw(master_fd) });
+        if let Ok(t) = termios_res {
+            let echo_off = !t.local_flags.contains(LocalFlags::ECHO);
+            let icanon_on = t.local_flags.contains(LocalFlags::ICANON);
+
+            // Canonical mode with ECHO off is the standard POSIX signature of password prompts (sudo, su, getpass, pam)
+            if echo_off && icanon_on {
+                return true;
+            }
+
+            // If ECHO is off and recent child output matches a known password prompt
+            if echo_off && Self::matches_password_prompt(recent_output) {
+                return true;
+            }
+        } else if Self::matches_password_prompt(recent_output) {
+            return true;
+        }
+
+        false
+    }
+
+    fn matches_password_prompt(recent_output: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(recent_output).to_lowercase();
+        text.contains("password")
+            || text.contains("passphrase")
+            || text.contains("[sudo]")
+            || text.contains("암호")
+            || text.contains("비밀번호")
+            || text.contains("pin:")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::pty::openpty;
+
+    #[test]
+    fn test_matches_password_prompt() {
+        assert!(PtyRunner::matches_password_prompt(
+            b"[sudo] password for user: "
+        ));
+        assert!(PtyRunner::matches_password_prompt(
+            b"Enter passphrase for key: "
+        ));
+        assert!(PtyRunner::matches_password_prompt(
+            "사용자 암호: ".as_bytes()
+        ));
+        assert!(PtyRunner::matches_password_prompt(
+            "비밀번호를 입력하세요: ".as_bytes()
+        ));
+        assert!(!PtyRunner::matches_password_prompt(b"git checkout main\n"));
+        assert!(!PtyRunner::matches_password_prompt(b"user@host:~$ "));
+    }
+
+    #[test]
+    fn test_is_password_input_mode_with_slave_termios() {
+        let pty_pair = openpty(None, None).unwrap();
+        let master_fd = pty_pair.master.as_raw_fd();
+        let slave_fd = pty_pair.slave.as_raw_fd();
+
+        // Initially ECHO is on
+        assert!(!PtyRunner::is_password_input_mode(master_fd, b""));
+
+        // Simulate sudo/readpassphrase turning off ECHO on slave (keeping ICANON on)
+        let mut termios = termios::tcgetattr(unsafe { BorrowedFd::borrow_raw(slave_fd) }).unwrap();
+        termios.local_flags.remove(LocalFlags::ECHO);
+        termios.local_flags.insert(LocalFlags::ICANON);
+        termios::tcsetattr(
+            unsafe { BorrowedFd::borrow_raw(slave_fd) },
+            SetArg::TCSANOW,
+            &termios,
+        )
+        .unwrap();
+
+        // Master inspects slave state -> Should detect password input mode!
+        assert!(PtyRunner::is_password_input_mode(master_fd, b""));
+
+        // When ECHO is restored -> Not password mode
+        termios.local_flags.insert(LocalFlags::ECHO);
+        termios::tcsetattr(
+            unsafe { BorrowedFd::borrow_raw(slave_fd) },
+            SetArg::TCSANOW,
+            &termios,
+        )
+        .unwrap();
+        assert!(!PtyRunner::is_password_input_mode(master_fd, b""));
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use argus_analyzer::{
     ClaudePromptParser, ProcessTreeBuilder, PromptDriftDetector, SemanticSummarizer,
-    SessionCorrelator,
+    SessionCorrelator, SessionWatcher, TelegramConfig, TriggerConfig,
 };
 use argus_collector::{AuditStore, SessionSummary};
 use argus_common::events::AuditEvent;
@@ -86,6 +86,41 @@ enum Commands {
         /// Optional path to Claude CLI history.jsonl
         #[arg(long)]
         claude_history: Option<PathBuf>,
+    },
+
+    /// Monitor sessions and dispatch AI-aware Telegram notifications (Idle 3m/15m, SSH Detach, Work Rollup)
+    Notify {
+        /// Run continuously as a background watcher daemon
+        #[arg(long, default_value_t = false)]
+        daemon: bool,
+
+        /// Check interval in seconds for daemon mode (default: 15)
+        #[arg(long, default_value = "15")]
+        interval: u64,
+
+        /// Dry-run mode: evaluate triggers and print notification report to stdout without sending to Telegram
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
+        /// Telegram Bot Token (can also be set via ARGUS_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN)
+        #[arg(long, env = "ARGUS_TELEGRAM_BOT_TOKEN")]
+        telegram_bot_token: Option<String>,
+
+        /// Telegram Target Chat ID (default: your_chat_id_here)
+        #[arg(long, env = "ARGUS_TELEGRAM_CHAT_ID", allow_hyphen_values = true)]
+        telegram_chat_id: Option<String>,
+
+        /// Telegram Topic Thread ID (default: 6269)
+        #[arg(long, env = "ARGUS_TELEGRAM_THREAD_ID", allow_hyphen_values = true)]
+        telegram_thread_id: Option<i64>,
+
+        /// Idle timeout for regular shell sessions in minutes (default: 3)
+        #[arg(long, default_value = "3")]
+        shell_idle_mins: u64,
+
+        /// Idle timeout for AI (Claude Code) sessions in minutes (default: 15)
+        #[arg(long, default_value = "15")]
+        ai_idle_mins: u64,
     },
 }
 
@@ -189,6 +224,55 @@ async fn main() -> Result<()> {
                     );
                     for reason in &drift.reasons {
                         println!("      - {}", reason);
+                    }
+                }
+            }
+        }
+        Commands::Notify {
+            daemon,
+            interval,
+            dry_run,
+            telegram_bot_token,
+            telegram_chat_id,
+            telegram_thread_id,
+            shell_idle_mins,
+            ai_idle_mins,
+        } => {
+            let store = AuditStore::new(&cli.db)?;
+            let trigger_config = TriggerConfig::from_mins(shell_idle_mins, ai_idle_mins);
+
+            let mut telegram_config = TelegramConfig::from_env();
+            if let Some(tok) = telegram_bot_token {
+                telegram_config.bot_token = Some(tok);
+            }
+            if let Some(cid) = telegram_chat_id {
+                telegram_config.chat_id = Some(cid);
+            }
+            if let Some(tid) = telegram_thread_id {
+                telegram_config.thread_id = Some(tid);
+            }
+
+            let watcher = SessionWatcher::new(store, trigger_config, telegram_config, dry_run);
+
+            if daemon {
+                println!("=== Starting Argus AI-Aware Session Watcher Daemon ===");
+                println!("  * Polling interval: {}s", interval);
+                println!("  * Shell idle threshold: {}m", shell_idle_mins);
+                println!("  * AI/Claude idle threshold: {}m", ai_idle_mins);
+                println!("  * Dry run: {}", dry_run);
+                watcher
+                    .run_daemon(Duration::from_secs(interval), None)
+                    .await?;
+            } else {
+                println!("=== Running One-Shot AI-Aware Session Trigger Check ===");
+                let reports = watcher.check_all_sessions().await?;
+                if reports.is_empty() {
+                    println!("No sessions triggered notifications during this check.");
+                } else {
+                    println!("Triggered {} notification(s):", reports.len());
+                    for r in &reports {
+                        println!("\n--------------------------------------------------");
+                        println!("{}", r.format_telegram_markdown());
                     }
                 }
             }

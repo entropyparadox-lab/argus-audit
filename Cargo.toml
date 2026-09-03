@@ -38,6 +38,7 @@ bytes = "1.6"
 tempfile = "3.10"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 regex = "1.10"
 
 # Internal crates
