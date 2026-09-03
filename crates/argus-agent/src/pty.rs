@@ -8,7 +8,7 @@ use nix::sys::wait::waitpid;
 use nix::unistd::{close, dup2, execvp, fork, read, write, ForkResult, Pid};
 use std::ffi::CString;
 use std::io::{self, stdout, IsTerminal};
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
@@ -63,7 +63,7 @@ impl Drop for RawTerminalGuard {
 
 pub struct PtyRunner {
     pub session_id: Uuid,
-    pub shell: String,
+    pub command: Vec<String>,
     pub event_tx: Sender<AuditEvent>,
     pub mask_secrets: bool,
 }
@@ -71,22 +71,36 @@ pub struct PtyRunner {
 impl PtyRunner {
     pub fn new(
         session_id: Uuid,
-        shell: String,
+        command: Vec<String>,
         event_tx: Sender<AuditEvent>,
         mask_secrets: bool,
     ) -> Self {
         Self {
             session_id,
-            shell,
+            command,
             event_tx,
             mask_secrets,
         }
     }
 
-    /// Run the interactive session wrapper
+    /// Run the session wrapper (interactive shell or direct command)
     pub fn run(self, init_event: SessionInit) -> anyhow::Result<i32> {
         let start_time = Instant::now();
         let _ = self.event_tx.send(AuditEvent::SessionInit(init_event));
+
+        // If executing a specific command (e.g. via SSH ForceCommand), record it as the initial event
+        if self.command.len() > 1 || (!self.command.is_empty() && !self.command[0].ends_with("sh"))
+        {
+            let cmd_str = self.command.join(" ");
+            let event = KeystrokeInput::new(
+                self.session_id,
+                1,
+                0,
+                format!("{cmd_str}\n").into_bytes(),
+                true,
+            );
+            let _ = self.event_tx.send(AuditEvent::KeystrokeInput(event));
+        }
 
         // Get window size from stdout if available
         let winsize = if stdout().is_terminal() {
@@ -105,8 +119,8 @@ impl PtyRunner {
         };
 
         let pty_pair = openpty(winsize.as_ref(), None)?;
-        let master_fd = pty_pair.master.as_raw_fd();
-        let slave_fd = pty_pair.slave.as_raw_fd();
+        let master_fd = pty_pair.master.into_raw_fd();
+        let slave_fd = pty_pair.slave.into_raw_fd();
 
         match unsafe { fork()? } {
             ForkResult::Child => {
@@ -123,9 +137,19 @@ impl PtyRunner {
                 let _ = close(master_fd);
                 let _ = close(slave_fd);
 
-                let shell_c = CString::new(self.shell.as_str())?;
-                let args = [shell_c.clone()];
-                let _ = execvp(&shell_c, &args);
+                let program = self
+                    .command
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "/bin/bash".to_string());
+                let program_c = CString::new(program.as_str())?;
+                let args_c: Vec<CString> = self
+                    .command
+                    .iter()
+                    .map(|arg| CString::new(arg.as_str()).unwrap_or_default())
+                    .collect();
+                let args_ptrs: Vec<&std::ffi::CStr> = args_c.iter().map(|c| c.as_c_str()).collect();
+                let _ = execvp(&program_c, &args_ptrs);
                 std::process::exit(1);
             }
             ForkResult::Parent { child } => {
@@ -152,6 +176,7 @@ impl PtyRunner {
         let mut out_buf = [0u8; 16384];
         let mut in_password_mode = false;
         let mut recent_child_output = Vec::new();
+        let mut stdin_open = true;
 
         loop {
             // Check for window resize
@@ -165,17 +190,26 @@ impl PtyRunner {
             }
 
             let mut read_fds = FdSet::new();
-            read_fds.insert(unsafe { BorrowedFd::borrow_raw(stdin_fd) });
+            if stdin_open {
+                read_fds.insert(unsafe { BorrowedFd::borrow_raw(stdin_fd) });
+            }
             read_fds.insert(unsafe { BorrowedFd::borrow_raw(master_fd) });
 
-            let max_fd = master_fd.max(stdin_fd);
+            let max_fd = if stdin_open {
+                master_fd.max(stdin_fd)
+            } else {
+                master_fd
+            };
 
             match select(max_fd + 1, Some(&mut read_fds), None, None, None) {
                 Ok(_) => {
                     // 1. User typed or pasted on stdin -> Record as Input event & forward to child
-                    if read_fds.contains(unsafe { BorrowedFd::borrow_raw(stdin_fd) }) {
+                    if stdin_open && read_fds.contains(unsafe { BorrowedFd::borrow_raw(stdin_fd) })
+                    {
                         match read(stdin_fd, &mut in_buf) {
-                            Ok(0) => break, // EOF on stdin
+                            Ok(0) => {
+                                stdin_open = false;
+                            }
                             Ok(n) => {
                                 let elapsed = start_time.elapsed().as_millis() as u64;
                                 let raw_slice = in_buf[..n].to_vec();

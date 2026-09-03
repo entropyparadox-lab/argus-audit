@@ -32,13 +32,15 @@ impl EventUploader {
 
     /// Background worker loop consuming audit events from the channel
     pub async fn run_loop(self, rx: Receiver<AuditEvent>) {
+        // Short 2s network timeout so developer session exits are never blocked
         let client = Client::builder()
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_millis(2000))
             .build()
             .unwrap_or_default();
 
         let mut batch = Vec::new();
         let mut last_flush = std::time::Instant::now();
+        let mut consecutive_upload_errors = 0usize;
 
         loop {
             // Non-blocking try_recv or short wait
@@ -48,14 +50,24 @@ impl EventUploader {
                     if batch.len() >= self.batch_max_size
                         || last_flush.elapsed() >= self.batch_timeout
                     {
-                        self.flush_batch(&client, &batch).await;
+                        let ok = self.flush_batch(&client, &batch).await;
+                        if ok {
+                            consecutive_upload_errors = 0;
+                        } else {
+                            consecutive_upload_errors += 1;
+                        }
                         batch.clear();
                         last_flush = std::time::Instant::now();
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if !batch.is_empty() && last_flush.elapsed() >= self.batch_timeout {
-                        self.flush_batch(&client, &batch).await;
+                        let ok = self.flush_batch(&client, &batch).await;
+                        if ok {
+                            consecutive_upload_errors = 0;
+                        } else {
+                            consecutive_upload_errors += 1;
+                        }
                         batch.clear();
                         last_flush = std::time::Instant::now();
                     }
@@ -63,7 +75,12 @@ impl EventUploader {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // Session ended: flush remaining events and exit
                     if !batch.is_empty() {
-                        self.flush_batch(&client, &batch).await;
+                        // Fail-open: if collector is offline, skip remote upload retry to avoid delaying developer terminal exit
+                        if consecutive_upload_errors < 2 {
+                            let _ = self.flush_batch(&client, &batch).await;
+                        } else if let Some(ref path) = self.local_spool_path {
+                            Self::spool_to_disk(path, &batch);
+                        }
                     }
                     break;
                 }
@@ -71,18 +88,22 @@ impl EventUploader {
         }
     }
 
-    async fn flush_batch(&self, client: &Client, events: &[AuditEvent]) {
+    fn spool_to_disk(path: &PathBuf, events: &[AuditEvent]) {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            if let Ok(jsonl) = argus_common::codec::encode_events_jsonl(events) {
+                let _ = file.write_all(&jsonl);
+            }
+        }
+    }
+
+    async fn flush_batch(&self, client: &Client, events: &[AuditEvent]) -> bool {
         if events.is_empty() {
-            return;
+            return true;
         }
 
-        // 1. Spool to local file if configured
+        // 1. Spool to local file if configured (offline persistence)
         if let Some(ref path) = self.local_spool_path {
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                if let Ok(jsonl) = argus_common::codec::encode_events_jsonl(events) {
-                    let _ = file.write_all(&jsonl);
-                }
-            }
+            Self::spool_to_disk(path, events);
         }
 
         // 2. Upload to remote collector if URL is provided
@@ -107,16 +128,23 @@ impl EventUploader {
                                     libc::kill(0, libc::SIGKILL);
                                 }
                             }
+                            true
                         }
                         Err(e) => {
-                            error!("Failed to upload audit event batch to collector: {e}");
+                            error!(
+                                "Failed to upload audit event batch to collector (fail-open): {e}"
+                            );
+                            false
                         }
                     }
                 }
                 Err(e) => {
                     error!("Failed to compress audit events: {e}");
+                    false
                 }
             }
+        } else {
+            true
         }
     }
 }
