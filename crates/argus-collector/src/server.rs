@@ -158,8 +158,10 @@ struct ListQuery {
 
 async fn list_sessions_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<crate::storage::SessionSummary>>, StatusCode> {
+    check_auth(&state, &headers)?;
     let limit = query.limit.unwrap_or(50);
     match state.store.list_sessions(limit) {
         Ok(sessions) => Ok(Json(sessions)),
@@ -172,8 +174,10 @@ async fn list_sessions_handler(
 
 async fn get_session_events_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<AuditEvent>>, StatusCode> {
+    check_auth(&state, &headers)?;
     let session_id = match Uuid::parse_str(&id) {
         Ok(uid) => uid,
         Err(_) => return Err(StatusCode::BAD_REQUEST),
@@ -190,8 +194,10 @@ async fn get_session_events_handler(
 
 async fn verify_session_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&state, &headers)?;
     let session_id = match Uuid::parse_str(&id) {
         Ok(uid) => uid,
         Err(_) => return Err(StatusCode::BAD_REQUEST),
@@ -215,8 +221,10 @@ async fn verify_session_handler(
 
 async fn live_session_sse_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    check_auth(&state, &headers)?;
     let target_sid = match Uuid::parse_str(&id) {
         Ok(uid) => uid,
         Err(_) => return Err(StatusCode::BAD_REQUEST),
@@ -239,8 +247,10 @@ async fn live_session_sse_handler(
 
 async fn kill_session_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&state, &headers)?;
     let session_id = match Uuid::parse_str(&id) {
         Ok(uid) => uid,
         Err(_) => return Err(StatusCode::BAD_REQUEST),
@@ -258,8 +268,10 @@ async fn kill_session_handler(
 
 async fn check_kill_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&state, &headers)?;
     let session_id = match Uuid::parse_str(&id) {
         Ok(uid) => uid,
         Err(_) => return Err(StatusCode::BAD_REQUEST),
