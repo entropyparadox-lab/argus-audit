@@ -26,6 +26,10 @@ enum Commands {
         /// Path to SQLite audit database
         #[arg(long, default_value = "audit.db", env = "ARGUS_DB_PATH")]
         db: PathBuf,
+
+        /// Optional pre-shared bearer ingestion token for authentication
+        #[arg(long, env = "ARGUS_INGEST_TOKEN")]
+        token: Option<String>,
     },
 }
 
@@ -36,9 +40,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { bind, db } => {
+        Commands::Run { bind, db, token } => {
             let store = AuditStore::new(&db)?;
-            let server = CollectorServer::new(store, bind);
+            let server = CollectorServer::new(store, bind, token);
             server.run().await?;
         }
     }
