@@ -11,15 +11,20 @@ use tracing::{error, warn};
 pub struct EventUploader {
     collector_url: Option<String>,
     local_spool_path: Option<PathBuf>,
+    auth_token: Option<String>,
     batch_timeout: Duration,
     batch_max_size: usize,
 }
 
 impl EventUploader {
     pub fn new(collector_url: Option<String>, local_spool_path: Option<PathBuf>) -> Self {
+        let auth_token = std::env::var("ARGUS_INGEST_TOKEN")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
         Self {
             collector_url,
             local_spool_path,
+            auth_token,
             batch_timeout: Duration::from_millis(500),
             batch_max_size: 50,
         }
@@ -85,14 +90,16 @@ impl EventUploader {
             match serialize_and_compress_events(events, 3) {
                 Ok(compressed_bytes) => {
                     let endpoint = format!("{url}/api/v1/events");
-                    match client
+                    let mut req = client
                         .post(&endpoint)
                         .header("Content-Type", "application/octet-stream")
-                        .header("Content-Encoding", "zstd")
-                        .body(compressed_bytes)
-                        .send()
-                        .await
-                    {
+                        .header("Content-Encoding", "zstd");
+
+                    if let Some(ref token) = self.auth_token {
+                        req = req.header("Authorization", format!("Bearer {token}"));
+                    }
+
+                    match req.body(compressed_bytes).send().await {
                         Ok(resp) => {
                             if resp.headers().contains_key("X-Argus-Force-Kill") {
                                 warn!("⚠️ Received X-Argus-Force-Kill header from collector! Terminating session immediately.");

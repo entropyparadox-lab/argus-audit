@@ -241,6 +241,13 @@ impl NotificationReport {
 
         lines.push(format!("• *서버:* `{}`", self.hostname));
         lines.push(ssh_meta);
+        if self
+            .alerts
+            .iter()
+            .any(|a| a.contains("root shell escalation") || a.contains("Root shell escalation"))
+        {
+            lines.push("• *보안 상태:* ⚡ `root 권한 상승 이력 있음 (sudo -i / su)`".to_string());
+        }
         lines.push(format!(
             "• *세션 유형:* {}",
             self.session_type.display_name()

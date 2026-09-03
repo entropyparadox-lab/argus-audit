@@ -67,6 +67,27 @@ impl RuleEngine {
             });
         }
 
+        // 3. Interactive Root Privilege Escalation Patterns
+        let trimmed_lower = text.trim().to_lowercase();
+        if trimmed_lower.starts_with("sudo su")
+            || trimmed_lower.starts_with("sudo -i")
+            || trimmed_lower.starts_with("sudo -s")
+            || trimmed_lower.starts_with("sudo /bin/bash")
+            || trimmed_lower.starts_with("sudo /bin/zsh")
+            || trimmed_lower.starts_with("sudo /bin/sh")
+            || trimmed_lower.starts_with("su -")
+            || trimmed_lower.starts_with("su root")
+            || trimmed_lower == "su"
+        {
+            alerts.push(AnomalyAlert {
+                severity: Severity::Medium,
+                kind: SecurityEventKind::PrivilegeEscalationAttempt,
+                description: "Interactive root shell escalation executed (sudo su / -i / su)"
+                    .to_string(),
+                evidence: text.trim().to_string(),
+            });
+        }
+
         alerts
     }
 
@@ -89,6 +110,22 @@ impl RuleEngine {
                 severity: Severity::High,
                 kind: SecurityEventKind::SensitiveFileRead,
                 description: "Sensitive system credential file accessed".to_string(),
+                evidence: cmdline.clone(),
+            });
+        }
+
+        if exec.comm == "su"
+            || (exec.comm == "sudo"
+                && (cmdline.contains("-i")
+                    || cmdline.contains("-s")
+                    || cmdline.contains("su")
+                    || cmdline.contains("bash")
+                    || cmdline.contains("zsh")))
+        {
+            alerts.push(AnomalyAlert {
+                severity: Severity::Medium,
+                kind: SecurityEventKind::PrivilegeEscalationAttempt,
+                description: "Root shell escalation process executed".to_string(),
                 evidence: cmdline,
             });
         }
@@ -140,5 +177,18 @@ mod tests {
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].severity, Severity::Critical);
         assert_eq!(alerts[0].kind, SecurityEventKind::OutboundC2Attempt);
+    }
+
+    #[test]
+    fn test_root_escalation_detection() {
+        let input = KeystrokeInput::new(Uuid::new_v4(), 1, 100, b"sudo su -\n".to_vec(), false);
+
+        let alerts = RuleEngine::inspect_input(&input);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(
+            alerts[0].kind,
+            SecurityEventKind::PrivilegeEscalationAttempt
+        );
+        assert!(alerts[0].description.contains("root shell escalation"));
     }
 }

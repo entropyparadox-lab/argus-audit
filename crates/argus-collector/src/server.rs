@@ -31,6 +31,7 @@ pub struct AppState {
     pub store: AuditStore,
     pub event_tx: broadcast::Sender<AuditEvent>,
     pub killed_sessions: Arc<Mutex<HashSet<Uuid>>>,
+    pub ingest_token: Option<String>,
 }
 
 pub struct CollectorServer {
@@ -39,13 +40,14 @@ pub struct CollectorServer {
 }
 
 impl CollectorServer {
-    pub fn new(store: AuditStore, bind_addr: SocketAddr) -> Self {
+    pub fn new(store: AuditStore, bind_addr: SocketAddr, ingest_token: Option<String>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         Self {
             state: AppState {
                 store,
                 event_tx,
                 killed_sessions: Arc::new(Mutex::new(HashSet::new())),
+                ingest_token,
             },
             bind_addr,
         }
@@ -80,11 +82,34 @@ async fn health_handler() -> &'static str {
     "OK"
 }
 
+fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    if let Some(ref expected) = state.ingest_token {
+        let auth_val = headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| headers.get("X-Argus-Token").and_then(|v| v.to_str().ok()));
+
+        match auth_val {
+            Some(v) => {
+                let token = v.strip_prefix("Bearer ").unwrap_or(v).trim();
+                if token != expected {
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+            }
+            None => return Err(StatusCode::UNAUTHORIZED),
+        }
+    }
+    Ok(())
+}
+
 async fn ingest_events_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    if let Err(status) = check_auth(&state, &headers) {
+        return (status, HeaderMap::new());
+    }
     let is_zstd = headers
         .get("Content-Encoding")
         .and_then(|v| v.to_str().ok())

@@ -12,7 +12,7 @@ async fn test_e2e_agent_to_collector_pipeline() {
     let db_path = temp_dir.path().join("test_audit.db");
 
     let store = AuditStore::new(&db_path).unwrap();
-    let _server = CollectorServer::new(store.clone(), "127.0.0.1:0".parse().unwrap());
+    let _server = CollectorServer::new(store.clone(), "127.0.0.1:0".parse().unwrap(), None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = listener.local_addr().unwrap();
 
@@ -23,6 +23,7 @@ async fn test_e2e_agent_to_collector_pipeline() {
         killed_sessions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashSet::new(),
         )),
+        ingest_token: None,
     });
 
     // Spawn collector server in background task
@@ -111,4 +112,69 @@ async fn test_e2e_agent_to_collector_pipeline() {
 
     let saved_events = store.get_session_events(session_id).unwrap();
     assert_eq!(saved_events.len(), 4);
+}
+
+#[tokio::test]
+async fn test_collector_bearer_token_auth() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("test_auth.db");
+
+    let store = AuditStore::new(&db_path).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let (event_tx, _) = tokio::sync::broadcast::channel(1024);
+    let router = CollectorServer::build_router(argus_collector::server::AppState {
+        store: store.clone(),
+        event_tx,
+        killed_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
+        ingest_token: Some("secret-token-12345".to_string()),
+    });
+
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = Client::new();
+
+    // 1. Health is always public
+    let health = client
+        .get(format!("http://{local_addr}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+    // 2. Events without token -> 401
+    let unauth = client
+        .post(format!("http://{local_addr}/api/v1/events"))
+        .body(vec![])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 3. Events with wrong token -> 401
+    let wrong_token = client
+        .post(format!("http://{local_addr}/api/v1/events"))
+        .header("Authorization", "Bearer invalid-token")
+        .body(vec![])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 4. Events with valid token -> 202 Accepted
+    let valid_token = client
+        .post(format!("http://{local_addr}/api/v1/events"))
+        .header("Authorization", "Bearer secret-token-12345")
+        .body(vec![])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_token.status(), reqwest::StatusCode::ACCEPTED);
 }
