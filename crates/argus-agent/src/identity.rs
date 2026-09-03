@@ -196,7 +196,7 @@ mod tests {
         fs::create_dir_all(&ssh_dir).unwrap();
 
         let pub_blob = "AAAAC3NzaC1lZDI1NTE5AAAAIAGP15qR4B0l5w/Fz5G4YhXhV7zX7Fz1Z9tT8rG9p1bA";
-        let auth_keys_content = format!("ssh-ed25519 {} security@entropyparadox.com\n", pub_blob);
+        let auth_keys_content = format!("ssh-ed25519 {} alice@workstation.local\n", pub_blob);
         fs::write(ssh_dir.join("authorized_keys"), auth_keys_content).unwrap();
 
         let auth_info_file = temp_dir.path().join("auth_info");
@@ -210,7 +210,7 @@ mod tests {
 
         assert!(fp.is_some());
         assert!(fp.unwrap().starts_with("SHA256:"));
-        assert_eq!(comment.as_deref(), Some("security@entropyparadox.com"));
+        assert_eq!(comment.as_deref(), Some("alice@workstation.local"));
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
         fs::create_dir_all(&ssh_dir).unwrap();
 
         let pub_blob = "AAAAC3NzaC1lZDI1NTE5AAAAIAGP15qR4B0l5w/Fz5G4YhXhV7zX7Fz1Z9tT8rG9p1bA";
-        let auth_keys_content = format!("ssh-ed25519 {} operator@workstation\n", pub_blob);
+        let auth_keys_content = format!("ssh-ed25519 {} bob@laptop.local\n", pub_blob);
         fs::write(ssh_dir.join("authorized_keys"), auth_keys_content).unwrap();
 
         // No auth_info provided -> single key fallback
@@ -229,6 +229,6 @@ mod tests {
             IdentityResolver::resolve_ssh_key_identity_with_paths(None, Some(&home_dir));
 
         assert!(fp.is_some());
-        assert_eq!(comment.as_deref(), Some("operator@workstation"));
+        assert_eq!(comment.as_deref(), Some("bob@laptop.local"));
     }
 }

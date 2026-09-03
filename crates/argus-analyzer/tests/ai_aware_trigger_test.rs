@@ -19,13 +19,13 @@ fn test_ai_aware_dynamic_idle_3m_vs_15m() {
         AuditEvent::SessionInit(SessionInit {
             session_id: sid_shell,
             timestamp: start,
-            hostname: "ep-mac".into(),
-            username: "vodana".into(),
+            hostname: "prod-node-01".into(),
+            username: "alice".into(),
             tty: "ttys001".into(),
-            client_ip: Some("219.248.58.87".into()),
+            client_ip: Some("198.51.100.1".into()),
             client_port: Some(50001),
             ssh_key_fingerprint: None,
-            ssh_key_comment: Some("vodana@mac".into()),
+            ssh_key_comment: Some("alice@workstation".into()),
             env_context: None,
         }),
         AuditEvent::KeystrokeInput(
@@ -63,13 +63,13 @@ fn test_ai_aware_dynamic_idle_3m_vs_15m() {
         AuditEvent::SessionInit(SessionInit {
             session_id: sid_ai,
             timestamp: start,
-            hostname: "ep-mac".into(),
-            username: "vodana".into(),
+            hostname: "prod-node-01".into(),
+            username: "alice".into(),
             tty: "ttys002".into(),
-            client_ip: Some("219.248.58.87".into()),
+            client_ip: Some("198.51.100.1".into()),
             client_port: Some(50002),
             ssh_key_fingerprint: None,
-            ssh_key_comment: Some("vodana@mac".into()),
+            ssh_key_comment: Some("alice@workstation".into()),
             env_context: None,
         }),
         AuditEvent::KeystrokeInput(
@@ -125,10 +125,10 @@ fn test_ssh_client_disconnect_trigger() {
         AuditEvent::SessionInit(SessionInit {
             session_id: sid,
             timestamp: start,
-            hostname: "martian2".into(),
-            username: "martian2".into(),
+            hostname: "prod-node-02".into(),
+            username: "deployer".into(),
             tty: "pts/3".into(),
-            client_ip: Some("59.5.123.115".into()),
+            client_ip: Some("198.51.100.2".into()),
             client_port: Some(51234),
             ssh_key_fingerprint: None,
             ssh_key_comment: None,
@@ -180,13 +180,13 @@ async fn test_task_batching_and_delta_rollup() {
     let init = AuditEvent::SessionInit(SessionInit {
         session_id: sid,
         timestamp: start,
-        hostname: "ep-mac".into(),
-        username: "vodana".into(),
+        hostname: "prod-node-01".into(),
+        username: "alice".into(),
         tty: "ttys003".into(),
-        client_ip: Some("219.248.58.87".into()),
+        client_ip: Some("198.51.100.1".into()),
         client_port: Some(54321),
         ssh_key_fingerprint: None,
-        ssh_key_comment: Some("vodana@mac".into()),
+        ssh_key_comment: Some("alice@workstation".into()),
         env_context: None,
     });
 
@@ -209,7 +209,7 @@ async fn test_task_batching_and_delta_rollup() {
         bot_token: None, // dry run
         chat_id: Some("test".into()),
         thread_id: None,
-        server_name: Some("ep-mac".into()),
+        server_name: Some("prod-node-01".into()),
     };
 
     let watcher = SessionWatcher::new(

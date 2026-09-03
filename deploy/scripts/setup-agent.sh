@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COLLECTOR_URL="${1:-http://audit-collector.internal:19532}"
+COLLECTOR_URL="${1:-https://audit.example.com}"
 
 echo "=== [Argus Audit] Host Agent Setup ==="
 echo "Target Collector URL: ${COLLECTOR_URL}"
@@ -14,12 +14,12 @@ else
 fi
 
 # 2. Configure Global Profile Hook (/etc/profile.d/argus-agent.sh)
-cat << 'EOF' | sudo tee /etc/profile.d/argus-agent.sh > /dev/null
+cat << EOF | sudo tee /etc/profile.d/argus-agent.sh > /dev/null
 # Argus Audit Auto-Wrapper for Interactive Sessions
-if [ -z "${ARGUS_ACTIVE:-}" ] && [ -n "${PS1:-}" ] && [ -t 0 ]; then
+if [ -z "\${ARGUS_ACTIVE:-}" ] && [ -n "\${PS1:-}" ] && [ -t 0 ]; then
     export ARGUS_ACTIVE=1
-    export ARGUS_COLLECTOR_URL="http://audit-collector.internal:19532"
-    exec /usr/local/bin/argus-agent wrap --collector "${ARGUS_COLLECTOR_URL}"
+    export ARGUS_COLLECTOR_URL="${COLLECTOR_URL}"
+    exec /usr/local/bin/argus-agent wrap --collector "\${ARGUS_COLLECTOR_URL}"
 fi
 EOF
 

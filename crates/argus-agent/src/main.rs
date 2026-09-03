@@ -24,7 +24,7 @@ enum Commands {
         #[arg(short, long)]
         shell: Option<String>,
 
-        /// Remote collector ingestion URL (e.g. http://audit-collector.internal:19532)
+        /// Remote collector ingestion URL (e.g. https://audit.example.com or http://127.0.0.1:19532)
         #[arg(short, long, env = "ARGUS_COLLECTOR_URL")]
         collector: Option<String>,
 

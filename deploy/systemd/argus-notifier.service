@@ -5,14 +5,17 @@ Wants=argus-collector.service
 
 [Service]
 Type=simple
-User=cycorld
-WorkingDirectory=/home/cycorld/.local/share/argus
-ExecStart=/home/cycorld/bin/argus --db /home/cycorld/.local/share/argus/audit.db notify --daemon --interval 15 --shell-idle-mins 3 --ai-idle-mins 15
+User=argus
+WorkingDirectory=/var/lib/argus
+ExecStart=/usr/local/bin/argus --db /var/lib/argus/audit.db notify --daemon --interval 15 --shell-idle-mins 3 --ai-idle-mins 15
 Restart=always
 RestartSec=5s
 Environment=RUST_LOG=info
+Environment=ARGUS_TELEGRAM_BOT_TOKEN=your_bot_token_here
 Environment=ARGUS_TELEGRAM_CHAT_ID=your_chat_id_here
-Environment=ARGUS_TELEGRAM_THREAD_ID=6269
+# Optional topic thread ID and operator mapping file
+# Environment=ARGUS_TELEGRAM_THREAD_ID=1234
+# Environment=ARGUS_OPERATORS_FILE=/etc/argus/operators.toml
 
 [Install]
 WantedBy=default.target

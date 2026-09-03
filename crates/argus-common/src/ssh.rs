@@ -126,14 +126,14 @@ mod tests {
 
     #[test]
     fn test_parse_authorized_keys_line_simple() {
-        let line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAGP15qR4B0l5w/Fz5G4YhXhV7zX7Fz1Z9tT8rG9p1bA security@entropyparadox.com";
+        let line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAGP15qR4B0l5w/Fz5G4YhXhV7zX7Fz1Z9tT8rG9p1bA alice@workstation.local";
         let parsed = parse_authorized_keys_line(line).expect("must parse");
         assert_eq!(parsed.key_type, "ssh-ed25519");
         assert_eq!(
             parsed.b64_blob,
             "AAAAC3NzaC1lZDI1NTE5AAAAIAGP15qR4B0l5w/Fz5G4YhXhV7zX7Fz1Z9tT8rG9p1bA"
         );
-        assert_eq!(parsed.comment.as_deref(), Some("security@entropyparadox.com"));
+        assert_eq!(parsed.comment.as_deref(), Some("alice@workstation.local"));
         assert!(parsed.fingerprint.starts_with("SHA256:"));
     }
 

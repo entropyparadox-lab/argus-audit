@@ -1,71 +1,92 @@
 use std::collections::HashMap;
 use std::env;
+use std::path::{Path, PathBuf};
 
 pub struct OperatorRegistry;
 
 impl OperatorRegistry {
+    /// Load operator mappings from config file or environment
+    fn get_mapping() -> HashMap<String, String> {
+        // 1. Explicit config file from environment
+        if let Ok(file_path) = env::var("ARGUS_OPERATORS_FILE") {
+            if let Some(map) = Self::load_from_file(Path::new(&file_path)) {
+                return map;
+            }
+        }
+
+        // 2. Default user config file (~/.config/argus/operators.toml)
+        if let Ok(home) = env::var("HOME") {
+            let default_path = PathBuf::from(home).join(".config/argus/operators.toml");
+            if default_path.exists() {
+                if let Some(map) = Self::load_from_file(&default_path) {
+                    return map;
+                }
+            }
+        }
+
+        // 3. JSON environment variable override
+        if let Ok(map_json) = env::var("ARGUS_OPERATORS_MAP") {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&map_json) {
+                return map
+                    .into_iter()
+                    .map(|(k, v)| (k.to_lowercase(), v))
+                    .collect();
+            }
+        }
+
+        HashMap::new()
+    }
+
+    /// Parse a simple key = "value" configuration file (TOML or Key-Value)
+    fn load_from_file(path: &Path) -> Option<HashMap<String, String>> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let mut map = HashMap::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') || trimmed.starts_with('[') || trimmed.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                let key = k.trim().trim_matches('"').trim_matches('\'').to_lowercase();
+                let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                if !key.is_empty() && !val.is_empty() {
+                    map.insert(key, val);
+                }
+            }
+        }
+        Some(map)
+    }
+
     /// Resolve canonical operator display name from username, comment, or fingerprint
     pub fn resolve_operator_name(
         username: &str,
         comment: Option<&str>,
         fingerprint: Option<&str>,
     ) -> Option<String> {
-        // 1. Dynamic override from environment variable (JSON string)
-        if let Ok(map_json) = env::var("ARGUS_OPERATORS_MAP") {
-            if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&map_json) {
-                if let Some(fp) = fingerprint {
-                    if let Some(name) = map.get(fp) {
-                        return Some(name.clone());
-                    }
-                }
-                if let Some(cmt) = comment {
-                    if let Some(name) = map.get(cmt) {
-                        return Some(name.clone());
-                    }
-                }
-                if let Some(name) = map.get(username) {
-                    return Some(name.clone());
-                }
+        let map = Self::get_mapping();
+
+        // 1. Match against SSH key fingerprint
+        if let Some(fp) = fingerprint {
+            if let Some(name) = map.get(&fp.to_lowercase()) {
+                return Some(name.clone());
             }
         }
 
-        // 2. Built-in Core Team Knowledge Mapping
+        // 2. Match against SSH key comment
         if let Some(cmt) = comment {
-            let lower = cmt.to_lowercase();
-            if lower.contains("charles") || lower.contains("cycorld") || cmt.contains("최용철") {
-                return Some("최용철".to_string());
-            } else if lower.contains("juchan")
-                || lower.contains("chan@")
-                || lower.contains("chansui")
-            {
-                return Some("임주찬".to_string());
-            } else if lower.contains("hosung") || lower.contains("songhoseong") {
-                return Some("송호성".to_string());
-            } else if lower.contains("operator")
-                || lower.contains("sungho")
-                || lower.contains("seongho")
-                || cmt.contains("윤성호")
-            {
-                return Some("윤성호".to_string());
-            } else if lower.contains("vodana") {
-                return Some("vodana".to_string());
-            } else if lower.contains("dongjae") {
-                return Some("이동재".to_string());
-            } else if lower.contains("hyungsuk") {
-                return Some("최형석".to_string());
-            } else if lower.contains("bluesh55") || lower.contains("seunghwan") {
-                return Some("오승환".to_string());
-            } else if lower.contains("jisoo") {
-                return Some("이지수".to_string());
-            } else if lower.contains("mingyeong") || lower.contains("mingyeoc") {
-                return Some("민경문".to_string());
-            } else if lower.contains("hoeyun") {
-                return Some("회윤".to_string());
-            } else if lower.contains("soone") {
-                return Some("soone".to_string());
+            let cmt_lower = cmt.to_lowercase();
+
+            // Direct match or substring match from mapping
+            if let Some(name) = map.get(&cmt_lower) {
+                return Some(name.clone());
+            }
+            for (pattern, name) in &map {
+                if cmt_lower.contains(pattern) {
+                    return Some(name.clone());
+                }
             }
 
-            // Clean fallback from comment (e.g. user@host -> user)
+            // Clean fallback from comment (e.g. alice@workstation -> alice)
             let trimmed = cmt.trim();
             if !trimmed.is_empty() {
                 let user_part = trimmed.split('@').next().unwrap_or(trimmed);
@@ -73,54 +94,48 @@ impl OperatorRegistry {
             }
         }
 
-        // 3. Fallback based on username if explicit team member account (ONLY when comment is None)
+        // 3. Fallback based on system username
         let user_lower = username.to_lowercase();
-        if user_lower == "cycorld" || user_lower == "charles" {
-            Some("최용철".to_string())
-        } else if user_lower == "juchan" {
-            Some("임주찬".to_string())
-        } else if user_lower == "hosung" {
-            Some("송호성".to_string())
-        } else if user_lower == "sungho" || user_lower == "seongho" {
-            Some("윤성호".to_string())
-        } else if user_lower == "vodana" {
-            Some("vodana".to_string())
-        } else {
-            None
+        if let Some(name) = map.get(&user_lower) {
+            return Some(name.clone());
         }
+
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
-    fn test_resolve_from_comment() {
-        let name =
-            OperatorRegistry::resolve_operator_name("ubuntu", Some("security@entropyparadox.com"), None);
-        assert_eq!(name.as_deref(), Some("최용철"));
+    fn test_resolve_from_config_file() {
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            temp_file,
+            "[operators]\nalice = \"Alice Developer\"\nbob@workstation = \"Bob Engineer\"\n"
+        )
+        .unwrap();
 
-        let name2 = OperatorRegistry::resolve_operator_name(
-            "vodana",
-            Some("juchan@entropyparadox.com"),
-            None,
-        );
-        assert_eq!(name2.as_deref(), Some("임주찬"));
+        unsafe {
+            env::set_var("ARGUS_OPERATORS_FILE", temp_file.path());
+        }
+
+        let name1 = OperatorRegistry::resolve_operator_name("alice", None, None);
+        assert_eq!(name1.as_deref(), Some("Alice Developer"));
+
+        let name2 = OperatorRegistry::resolve_operator_name("guest", Some("bob@workstation"), None);
+        assert_eq!(name2.as_deref(), Some("Bob Engineer"));
+
+        unsafe {
+            env::remove_var("ARGUS_OPERATORS_FILE");
+        }
     }
 
     #[test]
-    fn test_resolve_from_username() {
-        let name = OperatorRegistry::resolve_operator_name("cycorld", None, None);
-        assert_eq!(name.as_deref(), Some("최용철"));
-
-        let name2 = OperatorRegistry::resolve_operator_name("vodana", None, None);
-        assert_eq!(name2.as_deref(), Some("vodana"));
-
-        let name3 = OperatorRegistry::resolve_operator_name("hosung", None, None);
-        assert_eq!(name3.as_deref(), Some("송호성"));
-
-        let name4 = OperatorRegistry::resolve_operator_name("juchan", None, None);
-        assert_eq!(name4.as_deref(), Some("임주찬"));
+    fn test_resolve_fallback_from_comment() {
+        let name = OperatorRegistry::resolve_operator_name("ubuntu", Some("charlie@node01"), None);
+        assert_eq!(name.as_deref(), Some("charlie"));
     }
 }

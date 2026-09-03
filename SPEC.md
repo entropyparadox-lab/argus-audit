@@ -62,7 +62,7 @@
 * Background ring-buffer with real-time Zstd compression and HTTP/2 streaming client.
 
 ### 3.3 `argus-collector`
-* High-throughput central ingestion daemon running on the central monitoring server (`collector-01`).
+* High-throughput central ingestion daemon running on the central monitoring server.
 * Axum-based streaming ingestion endpoint over Tailscale.
 * SQLite / DuckDB storage engine with daily partition and WAL mode.
 * Strictly sandboxed storage (`chmod 700`, `root:root` access).

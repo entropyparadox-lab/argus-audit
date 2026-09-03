@@ -34,14 +34,12 @@ impl TelegramConfig {
         let chat_id = env::var("ARGUS_TELEGRAM_CHAT_ID")
             .or_else(|_| env::var("TELEGRAM_CHAT_ID"))
             .ok()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| Some("your_chat_id_here".to_string())); // Default: Internal Topic
+            .filter(|s| !s.trim().is_empty());
 
         let thread_id = env::var("ARGUS_TELEGRAM_THREAD_ID")
             .or_else(|_| env::var("TELEGRAM_THREAD_ID"))
             .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .or(Some(6269)); // Default: 🛡️ Argus Audit Topic (6269)
+            .and_then(|s| s.parse::<i64>().ok());
 
         let server_name = env::var("ARGUS_SERVER_NAME")
             .or_else(|_| env::var("HOSTNAME"))
@@ -361,13 +359,13 @@ mod tests {
         let init = SessionInit {
             session_id: sid,
             timestamp: Utc::now(),
-            hostname: "ep-mac".into(),
-            username: "vodana".into(),
+            hostname: "prod-server-01".into(),
+            username: "alice".into(),
             tty: "ttys002".into(),
-            client_ip: Some("219.248.58.87".into()),
+            client_ip: Some("198.51.100.42".into()),
             client_port: Some(52341),
             ssh_key_fingerprint: Some("SHA256:abcd".into()),
-            ssh_key_comment: Some("operator@workstation".into()),
+            ssh_key_comment: Some("alice@workstation".into()),
             env_context: None,
         };
 
@@ -407,9 +405,9 @@ mod tests {
 
         let md = report.format_telegram_markdown();
         assert!(md.contains("🛡️ *[Argus Audit] 작업 완료 알림*"));
-        assert!(md.contains("ep-mac"));
-        assert!(md.contains("vodana"));
-        assert!(md.contains("219.248.58.87"));
+        assert!(md.contains("prod-server-01"));
+        assert!(md.contains("alice"));
+        assert!(md.contains("198.51.100.42"));
         assert!(md.contains("⏱️ 유휴 감지"));
         assert!(md.contains("🤖 Claude Code: \"Refactor dynamic idle timeout in Rust\""));
         assert!(md.contains("`git checkout -b feat/ai-trigger`"));

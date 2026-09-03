@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Cycorld <security@entropyparadox.com>"]
+authors = ["Entropy Paradox Lab <security@entropyparadox.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/entropyparadox-lab/argus-audit"
 description = "Zero-overhead Linux Dev & AI Activity Audit Engine in Rust"

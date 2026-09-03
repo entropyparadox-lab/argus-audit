@@ -106,11 +106,11 @@ enum Commands {
         #[arg(long, env = "ARGUS_TELEGRAM_BOT_TOKEN")]
         telegram_bot_token: Option<String>,
 
-        /// Telegram Target Chat ID (default: your_chat_id_here)
+        /// Telegram Target Chat ID (can also be set via ARGUS_TELEGRAM_CHAT_ID)
         #[arg(long, env = "ARGUS_TELEGRAM_CHAT_ID", allow_hyphen_values = true)]
         telegram_chat_id: Option<String>,
 
-        /// Telegram Topic Thread ID (default: 6269)
+        /// Telegram Topic Thread ID (optional topic thread, can also be set via ARGUS_TELEGRAM_THREAD_ID)
         #[arg(long, env = "ARGUS_TELEGRAM_THREAD_ID", allow_hyphen_values = true)]
         telegram_thread_id: Option<i64>,
 
