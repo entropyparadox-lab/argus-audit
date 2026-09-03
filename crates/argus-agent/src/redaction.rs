@@ -10,8 +10,29 @@ static PRIVATE_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static GITHUB_TOKEN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"gh[pousr]_[0-9a-zA-Z]{36,}|github_pat_[0-9a-zA-Z_]{82}").unwrap()
 });
-static AI_KEY_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"sk-(proj|ant)-[0-9a-zA-Z_-]{20,}").unwrap());
+
+// Dedicated LLM & AI Service API Keys (Gitleaks Standard Patterns)
+static ANTHROPIC_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(sk-ant-(?:api03-|admin01-)?[a-zA-Z0-9_-]{20,})\b").unwrap());
+static OPENAI_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(sk-(?:proj-|svcacct-|admin-)[a-zA-Z0-9_-]{20,}|sk-[a-zA-Z0-9]{32,51})\b")
+        .unwrap()
+});
+static GEMINI_GCP_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(AIza[0-9A-Za-z_-]{35})\b").unwrap());
+static HUGGINGFACE_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(hf_[a-zA-Z0-9]{34,}|api_org_[a-zA-Z0-9]{34,})\b").unwrap());
+static GROQ_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(gsk_[a-zA-Z0-9]{48,})\b").unwrap());
+static REPLICATE_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(r8_[a-zA-Z0-9]{32,})\b").unwrap());
+static OPENROUTER_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(sk-or-v1-[a-f0-9]{64})\b").unwrap());
+static PERPLEXITY_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(pplx-[a-zA-Z0-9]{48})\b").unwrap());
+static DEEPSEEK_KEY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(sk-[a-f0-9]{32})\b").unwrap());
+
 static SLACK_TOKEN_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"xox[baprs]-[0-9a-zA-Z]{10,48}").unwrap());
 static NPM_TOKEN_REGEX: LazyLock<Regex> =
@@ -67,8 +88,16 @@ impl SecretRedactor {
         let step1 = AWS_KEY_REGEX.replace_all(text, "[REDACTED:AWS_KEY]");
         let step2 = PRIVATE_KEY_REGEX.replace_all(&step1, "[REDACTED:PRIVATE_KEY]");
         let step3 = GITHUB_TOKEN_REGEX.replace_all(&step2, "[REDACTED:GITHUB_TOKEN]");
-        let step4 = AI_KEY_REGEX.replace_all(&step3, "[REDACTED:AI_API_KEY]");
-        let step5 = SLACK_TOKEN_REGEX.replace_all(&step4, "[REDACTED:SLACK_TOKEN]");
+        let step4_1 = ANTHROPIC_KEY_REGEX.replace_all(&step3, "[REDACTED:ANTHROPIC_KEY]");
+        let step4_2 = OPENAI_KEY_REGEX.replace_all(&step4_1, "[REDACTED:OPENAI_KEY]");
+        let step4_3 = GEMINI_GCP_KEY_REGEX.replace_all(&step4_2, "[REDACTED:GEMINI_KEY]");
+        let step4_4 = HUGGINGFACE_KEY_REGEX.replace_all(&step4_3, "[REDACTED:HUGGINGFACE_TOKEN]");
+        let step4_5 = GROQ_KEY_REGEX.replace_all(&step4_4, "[REDACTED:GROQ_KEY]");
+        let step4_6 = REPLICATE_KEY_REGEX.replace_all(&step4_5, "[REDACTED:REPLICATE_KEY]");
+        let step4_7 = OPENROUTER_KEY_REGEX.replace_all(&step4_6, "[REDACTED:OPENROUTER_KEY]");
+        let step4_8 = PERPLEXITY_KEY_REGEX.replace_all(&step4_7, "[REDACTED:PERPLEXITY_KEY]");
+        let step4_9 = DEEPSEEK_KEY_REGEX.replace_all(&step4_8, "[REDACTED:DEEPSEEK_KEY]");
+        let step5 = SLACK_TOKEN_REGEX.replace_all(&step4_9, "[REDACTED:SLACK_TOKEN]");
         let step6 = NPM_TOKEN_REGEX.replace_all(&step5, "[REDACTED:NPM_TOKEN]");
         let step7 = JWT_TOKEN_REGEX.replace_all(&step6, "[REDACTED:JWT]");
 
@@ -111,9 +140,12 @@ mod tests {
 
     #[test]
     fn test_redact_ai_and_github_keys() {
-        let input = "header: sk-proj-1234567890abcdefghijklmn and token ghp_123456789012345678901234567890123456\n";
+        let input = "openai: sk-proj-1234567890abcdefghijklmn\nanthropic: sk-ant-api03-1234567890abcdefghijklmnAA\ngemini: AIzaSyD1234567890abcdefghijklmnopq12345\ngroq: gsk_123456789012345678901234567890123456789012345678\ngithub: ghp_123456789012345678901234567890123456\n";
         let redacted = SecretRedactor::redact_str(input);
-        assert!(redacted.contains("[REDACTED:AI_API_KEY]"));
+        assert!(redacted.contains("[REDACTED:OPENAI_KEY]"));
+        assert!(redacted.contains("[REDACTED:ANTHROPIC_KEY]"));
+        assert!(redacted.contains("[REDACTED:GEMINI_KEY]"));
+        assert!(redacted.contains("[REDACTED:GROQ_KEY]"));
         assert!(redacted.contains("[REDACTED:GITHUB_TOKEN]"));
     }
 
