@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
-use tracing::{error, warn};
+use tracing::warn;
 
 pub struct EventUploader {
     collector_url: Option<String>,
@@ -14,6 +14,7 @@ pub struct EventUploader {
     auth_token: Option<String>,
     batch_timeout: Duration,
     batch_max_size: usize,
+    timeout_secs: u64,
 }
 
 impl EventUploader {
@@ -21,26 +22,31 @@ impl EventUploader {
         let auth_token = std::env::var("ARGUS_INGEST_TOKEN")
             .ok()
             .filter(|s| !s.trim().is_empty());
+        let timeout_secs = std::env::var("ARGUS_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(7);
         Self {
             collector_url,
             local_spool_path,
             auth_token,
             batch_timeout: Duration::from_millis(500),
             batch_max_size: 50,
+            timeout_secs,
         }
     }
 
     /// Background worker loop consuming audit events from the channel
     pub async fn run_loop(self, rx: Receiver<AuditEvent>) {
-        // Short 2s network timeout so developer session exits are never blocked
+        // Robust 7s timeout to accommodate multi-hop/Anycast CDN latency
         let client = Client::builder()
-            .timeout(Duration::from_millis(2000))
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .connect_timeout(Duration::from_secs(4))
             .build()
             .unwrap_or_default();
 
         let mut batch = Vec::new();
         let mut last_flush = std::time::Instant::now();
-        let mut consecutive_upload_errors = 0usize;
 
         loop {
             // Non-blocking try_recv or short wait
@@ -50,24 +56,14 @@ impl EventUploader {
                     if batch.len() >= self.batch_max_size
                         || last_flush.elapsed() >= self.batch_timeout
                     {
-                        let ok = self.flush_batch(&client, &batch).await;
-                        if ok {
-                            consecutive_upload_errors = 0;
-                        } else {
-                            consecutive_upload_errors += 1;
-                        }
+                        let _ = self.flush_batch(&client, &batch).await;
                         batch.clear();
                         last_flush = std::time::Instant::now();
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if !batch.is_empty() && last_flush.elapsed() >= self.batch_timeout {
-                        let ok = self.flush_batch(&client, &batch).await;
-                        if ok {
-                            consecutive_upload_errors = 0;
-                        } else {
-                            consecutive_upload_errors += 1;
-                        }
+                        let _ = self.flush_batch(&client, &batch).await;
                         batch.clear();
                         last_flush = std::time::Instant::now();
                     }
@@ -75,12 +71,7 @@ impl EventUploader {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // Session ended: flush remaining events and exit
                     if !batch.is_empty() {
-                        // Fail-open: if collector is offline, skip remote upload retry to avoid delaying developer terminal exit
-                        if consecutive_upload_errors < 2 {
-                            let _ = self.flush_batch(&client, &batch).await;
-                        } else if let Some(ref path) = self.local_spool_path {
-                            Self::spool_to_disk(path, &batch);
-                        }
+                        let _ = self.flush_batch(&client, &batch).await;
                     }
                     break;
                 }
@@ -101,12 +92,7 @@ impl EventUploader {
             return true;
         }
 
-        // 1. Spool to local file if configured (offline persistence)
-        if let Some(ref path) = self.local_spool_path {
-            Self::spool_to_disk(path, events);
-        }
-
-        // 2. Upload to remote collector if URL is provided
+        // Upload to remote collector if URL is provided
         if let Some(ref url) = self.collector_url {
             match serialize_and_compress_events(events, 3) {
                 Ok(compressed_bytes) => {
@@ -128,21 +114,39 @@ impl EventUploader {
                                     libc::kill(0, libc::SIGKILL);
                                 }
                             }
-                            true
+                            if resp.status().is_success() {
+                                true
+                            } else {
+                                warn!("Collector returned non-success HTTP status: {}", resp.status());
+                                if let Some(ref path) = self.local_spool_path {
+                                    Self::spool_to_disk(path, events);
+                                }
+                                false
+                            }
                         }
                         Err(e) => {
-                            error!(
+                            warn!(
                                 "Failed to upload audit event batch to collector (fail-open): {e}"
                             );
+                            if let Some(ref path) = self.local_spool_path {
+                                Self::spool_to_disk(path, events);
+                            }
                             false
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Failed to compress audit events: {e}");
+                    warn!("Failed to compress audit events: {e}");
+                    if let Some(ref path) = self.local_spool_path {
+                        Self::spool_to_disk(path, events);
+                    }
                     false
                 }
             }
+        } else if let Some(ref path) = self.local_spool_path {
+            // No remote collector configured: offline spooling only
+            Self::spool_to_disk(path, events);
+            true
         } else {
             true
         }

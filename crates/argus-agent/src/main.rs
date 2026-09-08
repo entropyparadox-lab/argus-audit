@@ -4,6 +4,39 @@ use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use uuid::Uuid;
 
+fn init_logging() {
+    let log_path = std::env::var("ARGUS_LOG_FILE")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".local/share/argus/agent.log"))
+        });
+
+    if let Some(path) = log_path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = tracing_subscriber::fmt()
+                .with_writer(file)
+                .with_ansi(false)
+                .try_init();
+            return;
+        }
+    }
+
+    // Default fallback: completely silent (never output to stderr or user terminal)
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::sink)
+        .try_init();
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "argus-agent",
@@ -43,7 +76,7 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    init_logging();
 
     let cli = Cli::parse();
 
