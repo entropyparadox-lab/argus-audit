@@ -1,9 +1,11 @@
 use crate::notifier::{NotificationReport, TelegramConfig, TelegramNotifier};
-use crate::trigger::{AiAwareTriggerEvaluator, TriggerConfig};
+use crate::trigger::{AiAwareTriggerEvaluator, TriggerConfig, TriggerReason};
 use anyhow::Result;
 use argus_collector::AuditStore;
 use argus_common::events::AuditEvent;
 use chrono::Utc;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
@@ -12,6 +14,7 @@ pub struct SessionWatcher {
     trigger_config: TriggerConfig,
     telegram_config: TelegramConfig,
     dry_run: bool,
+    recent_dispatches: Mutex<HashMap<(String, String), std::time::Instant>>,
 }
 
 impl SessionWatcher {
@@ -26,6 +29,7 @@ impl SessionWatcher {
             trigger_config,
             telegram_config,
             dry_run,
+            recent_dispatches: Mutex::new(HashMap::new()),
         }
     }
 
@@ -55,9 +59,20 @@ impl SessionWatcher {
                 &self.trigger_config,
             );
 
-            if eval.should_notify {
-                let trigger_reason = eval.trigger_reason.clone().unwrap();
-                let is_tampered = self.store.verify_session_integrity(s.session_id).is_err();
+            let is_tampered = self.store.verify_session_integrity(s.session_id).is_err();
+            let should_notify = eval.should_notify || (is_tampered && !eval.unnotified_events.is_empty());
+
+            if should_notify {
+                let trigger_reason = if let Some(r) = eval.trigger_reason.clone() {
+                    r
+                } else if is_tampered {
+                    TriggerReason::SecurityAnomaly {
+                        alert_count: 1,
+                        max_severity: "Critical (해시 체인 불일치)".to_string(),
+                    }
+                } else {
+                    continue;
+                };
 
                 let init_event = events.iter().find_map(|e| match e {
                     AuditEvent::SessionInit(init) => Some(init),
@@ -74,32 +89,66 @@ impl SessionWatcher {
                     is_tampered,
                 );
 
+                let is_security = report.alert_count > 0
+                    || report.is_tampered
+                    || matches!(report.trigger_reason, TriggerReason::SecurityAnomaly { .. });
+                let summary_preview = report.key_activities.join("; ");
+
                 if !self.dry_run {
-                    if report.key_activities.is_empty()
-                        && report.alert_count == 0
-                        && !report.is_tampered
-                    {
+                    if report.key_activities.is_empty() && !is_security {
                         info!(
                             "Skipping notification dispatch for {} (0 activities, 0 alerts)",
                             s.session_id
                         );
-                    } else if let Err(e) =
-                        TelegramNotifier::send_report(&self.telegram_config, &report).await
-                    {
-                        error!(
-                            "Failed to dispatch Telegram notification for session {}: {e}",
-                            s.session_id
-                        );
                     } else {
-                        info!(
-                            "Successfully dispatched session notification for {} (Trigger: {})",
-                            s.session_id,
-                            trigger_reason.display_text()
-                        );
+                        // Debounce duplicate notifications sent within recent window
+                        let is_duplicate = {
+                            let mut map = self.recent_dispatches.lock().unwrap();
+                            let key = (report.hostname.clone(), summary_preview.clone());
+                            let now = std::time::Instant::now();
+                            if map.len() > 500 {
+                                map.retain(|_, v| now.duration_since(*v) < Duration::from_secs(600));
+                            }
+                            if let Some(&last_sent) = map.get(&key) {
+                                let debounce_limit = if is_security {
+                                    Duration::from_secs(30)
+                                } else {
+                                    Duration::from_secs(180)
+                                };
+                                if now.duration_since(last_sent) < debounce_limit {
+                                    true
+                                } else {
+                                    map.insert(key, now);
+                                    false
+                                }
+                            } else {
+                                map.insert(key, now);
+                                false
+                            }
+                        };
+
+                        if is_duplicate {
+                            info!(
+                                "Skipping duplicate notification for {} on {} (Summary: '{}')",
+                                s.session_id, report.hostname, summary_preview
+                            );
+                        } else if let Err(e) =
+                            TelegramNotifier::send_report(&self.telegram_config, &report).await
+                        {
+                            error!(
+                                "Failed to dispatch Telegram notification for session {}: {e}",
+                                s.session_id
+                            );
+                        } else {
+                            info!(
+                                "Successfully dispatched session notification for {} (Trigger: {})",
+                                s.session_id,
+                                trigger_reason.display_text()
+                            );
+                        }
                     }
 
                     // Record checkpoint in SQLite
-                    let summary_preview = report.key_activities.join("; ");
                     if let Err(e) = self.store.record_notification(
                         s.session_id,
                         eval.latest_seq,

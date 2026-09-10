@@ -114,12 +114,12 @@ enum Commands {
         #[arg(long, env = "ARGUS_TELEGRAM_THREAD_ID", allow_hyphen_values = true)]
         telegram_thread_id: Option<i64>,
 
-        /// Idle timeout for regular shell sessions in minutes (default: 3)
-        #[arg(long, default_value = "3")]
+        /// Idle timeout for regular shell sessions in minutes (default: 15)
+        #[arg(long, default_value = "15")]
         shell_idle_mins: u64,
 
-        /// Idle timeout for AI (Claude Code) sessions in minutes (default: 15)
-        #[arg(long, default_value = "15")]
+        /// Idle timeout for AI (Claude Code) sessions in minutes (default: 30)
+        #[arg(long, default_value = "30")]
         ai_idle_mins: u64,
     },
 }

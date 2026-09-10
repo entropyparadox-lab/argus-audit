@@ -26,7 +26,7 @@ impl SessionType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TriggerReason {
-    /// Fired when terminal idle duration exceeds dynamic threshold (3m for shell, 15m for AI)
+    /// Fired when terminal idle duration exceeds dynamic threshold (15m for shell, 30m for AI)
     IdleTimeout { idle_secs: u64, threshold_secs: u64 },
     /// Fired when client disconnects (SSH detached, laptop closed, or TTY closed while background tasks run)
     ClientDisconnect { reason: String },
@@ -34,6 +34,11 @@ pub enum TriggerReason {
     SessionExit { exit_status: Option<i32> },
     /// Triggered manually by operator or CLI
     Manual,
+    /// Fired immediately upon detection of security anomalies or suspicious behavior
+    SecurityAnomaly {
+        alert_count: usize,
+        max_severity: String,
+    },
 }
 
 impl TriggerReason {
@@ -61,15 +66,21 @@ impl TriggerReason {
                 format!("🚪 정상 세션 종료 ({})", code)
             }
             TriggerReason::Manual => "✋ 수동 요약 요청".to_string(),
+            TriggerReason::SecurityAnomaly {
+                alert_count,
+                max_severity,
+            } => {
+                format!("🚨 긴급 보안 이상 감지 ({}건 / {})", alert_count, max_severity)
+            }
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TriggerConfig {
-    /// Idle timeout for regular terminal sessions (default: 3 minutes = 180s)
+    /// Idle timeout for regular terminal sessions (default: 15 minutes = 900s)
     pub shell_idle_secs: u64,
-    /// Dynamic expanded idle timeout for AI / Claude sessions (default: 15 minutes = 900s)
+    /// Dynamic expanded idle timeout for AI / Claude sessions (default: 30 minutes = 1800s)
     pub ai_idle_secs: u64,
     /// Minimum unnotified input bytes before triggering
     pub min_input_bytes: usize,
@@ -84,8 +95,8 @@ pub struct TriggerConfig {
 impl Default for TriggerConfig {
     fn default() -> Self {
         Self {
-            shell_idle_secs: 180, // 3 minutes
-            ai_idle_secs: 900,    // 15 minutes
+            shell_idle_secs: 900,  // 15 minutes (was 3m)
+            ai_idle_secs: 1800,    // 30 minutes (was 15m)
             min_input_bytes: 3,
             min_commands: 1,
             min_duration_secs: 2,
@@ -97,6 +108,8 @@ impl Default for TriggerConfig {
                 "w".into(),
                 "whoami".into(),
                 "uptime".into(),
+                "pwd".into(),
+                "history".into(),
             ],
         }
     }
@@ -218,11 +231,29 @@ impl AiAwareTriggerEvaluator {
             };
         }
 
-        // 3. Trigger 1 & 2 & 3 Evaluation
+        // 3. Trigger 0 (Security), 1 (End/Detach), 2 (Idle Timeout)
         let mut trigger_reason = None;
 
-        // Trigger A: Session Ended / SSH Client Detached
-        if let Some(ref end) = session_end_event {
+        // Trigger 0: IMMEDIATE Security Alert (Priority 1)
+        // If unnotified events contain any security anomalies (Critical, High, Medium), trigger immediately!
+        let security_alerts: Vec<_> = unnotified_events
+            .iter()
+            .flat_map(RuleEngine::inspect_event)
+            .collect();
+
+        if !security_alerts.is_empty() {
+            let alert_count = security_alerts.len();
+            let max_sev = security_alerts
+                .iter()
+                .map(|a| a.severity)
+                .max()
+                .unwrap_or(argus_common::events::Severity::Medium);
+            trigger_reason = Some(TriggerReason::SecurityAnomaly {
+                alert_count,
+                max_severity: format!("{:?}", max_sev),
+            });
+        } else if let Some(ref end) = session_end_event {
+            // Trigger A: Session Ended / SSH Client Detached
             if session_type.is_ai() {
                 trigger_reason = Some(TriggerReason::ClientDisconnect {
                     reason: "SSH 연결 종료 / 세션 Detach".into(),
@@ -233,7 +264,7 @@ impl AiAwareTriggerEvaluator {
                 });
             }
         } else {
-            // Trigger B: Dynamic Idle Timeout (3m Shell vs 15m AI)
+            // Trigger B: Dynamic Idle Timeout (15m Shell vs 30m AI)
             let threshold_secs = if session_type.is_ai() {
                 config.ai_idle_secs
             } else {
@@ -294,7 +325,7 @@ impl AiAwareTriggerEvaluator {
             );
         }
 
-        // Filter 2: All reconstructed commands are trivial commands (e.g. `exit`, `logout`, `clear`, `w`, `uptime`)
+        // Filter 2: All reconstructed commands are trivial commands (e.g. `exit`, `logout`, `clear`, `w`, `uptime`, `pwd`)
         let all_trivial = session.activities.iter().all(|act| {
             let cmd = act.content.trim().to_lowercase();
             let first_token = cmd.split_whitespace().next().unwrap_or("");
@@ -305,6 +336,23 @@ impl AiAwareTriggerEvaluator {
             return (
                 true,
                 Some("Suppressed trivial maintenance/navigation commands".to_string()),
+            );
+        }
+
+        // Filter 3: Pure environment sourcing / wrapper commands (e.g. `set -a && source ...`, `export ...`)
+        let all_env_wrappers = session.activities.iter().all(|act| {
+            let cmd = act.content.trim().to_lowercase();
+            cmd.starts_with("set -a && source")
+                || cmd.starts_with("set -a ; source")
+                || cmd.starts_with("source ")
+                || (cmd.starts_with(". ") && !cmd.starts_with("./"))
+                || cmd.starts_with("export ")
+        });
+
+        if all_env_wrappers && session.activities.len() <= 2 {
+            return (
+                true,
+                Some("Suppressed environment wrapper session".to_string()),
             );
         }
 
@@ -459,16 +507,58 @@ mod tests {
             .with_timestamp(start),
         );
 
+        // Check IMMEDIATELY (2 seconds after event, well before 15m idle)
         let eval = AiAwareTriggerEvaluator::evaluate(
             sid,
             start,
             &[secret_paste],
             0,
-            start + Duration::minutes(5),
+            start + Duration::seconds(2),
             &config,
         );
 
         assert!(eval.should_notify);
         assert!(!eval.is_noise);
+        match eval.trigger_reason {
+            Some(TriggerReason::SecurityAnomaly { alert_count, .. }) => {
+                assert_eq!(alert_count, 1);
+            }
+            other => panic!("Expected immediate SecurityAnomaly trigger, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_env_wrapper_noise_filter() {
+        let sid = Uuid::new_v4();
+        let config = TriggerConfig::default();
+        let start = Utc::now() - Duration::minutes(20);
+
+        // Subshell that only sources an environment file
+        let env_event = AuditEvent::KeystrokeInput(
+            KeystrokeInput::new(
+                sid,
+                1,
+                100,
+                b"set -a && source /path/to/.env\n".to_vec(),
+                true,
+            )
+            .with_timestamp(start),
+        );
+
+        let eval = AiAwareTriggerEvaluator::evaluate(
+            sid,
+            start,
+            &[env_event],
+            0,
+            start + Duration::minutes(20),
+            &config,
+        );
+
+        assert!(!eval.should_notify);
+        assert!(eval.is_noise);
+        assert_eq!(
+            eval.noise_reason,
+            Some("Suppressed environment wrapper session".to_string())
+        );
     }
 }

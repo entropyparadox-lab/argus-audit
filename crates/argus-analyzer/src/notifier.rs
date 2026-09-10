@@ -132,33 +132,38 @@ impl NotificationReport {
         }
         let alert_count = alerts.len();
 
-        // Extract top concise key activities (up to 8 deduplicated commands)
+        // Extract top concise key activities (up to 10 deduplicated commands)
         let mut key_activities = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        let mut total_unique = 0;
 
         for act in activities {
             let item = act.content.trim();
             if !item.is_empty() && !seen.contains(item) {
                 seen.insert(item.to_string());
-                let short_cmd = if item.chars().count() > 100 {
-                    let truncated: String = item.chars().take(100).collect();
-                    format!("{truncated}...")
-                } else {
-                    item.to_string()
-                };
+                total_unique += 1;
 
-                let safe_cmd = short_cmd.replace('`', "'");
+                if key_activities.len() < 10 {
+                    let short_cmd = if item.chars().count() > 100 {
+                        let truncated: String = item.chars().take(100).collect();
+                        format!("{truncated}...")
+                    } else {
+                        item.to_string()
+                    };
 
-                if act.is_ai {
-                    key_activities.push(format!("🤖 Claude Code: \"{}\"", safe_cmd));
-                } else {
-                    key_activities.push(format!("`{}`", safe_cmd));
-                }
+                    let safe_cmd = short_cmd.replace('`', "'");
 
-                if key_activities.len() >= 8 {
-                    break;
+                    if act.is_ai {
+                        key_activities.push(format!("🤖 Claude Code: \"{}\"", safe_cmd));
+                    } else {
+                        key_activities.push(format!("`{}`", safe_cmd));
+                    }
                 }
             }
+        }
+
+        if total_unique > 10 {
+            key_activities.push(format!("_(외 {}개 작업 생략)_", total_unique - 10));
         }
 
         Self {
@@ -188,7 +193,15 @@ impl NotificationReport {
         let end_str = self.end_time.format("%H:%M").to_string();
 
         let mut lines = Vec::new();
-        lines.push("🛡️ *[Argus Audit] 작업 완료 알림*".to_string());
+        let is_security = self.alert_count > 0
+            || self.is_tampered
+            || matches!(self.trigger_reason, TriggerReason::SecurityAnomaly { .. });
+
+        if is_security {
+            lines.push("🚨 *[Argus Audit] 긴급 보안 이상 경보*".to_string());
+        } else {
+            lines.push("🛡️ *[Argus Audit] 작업 완료 알림*".to_string());
+        }
         lines.push("".to_string());
 
         let operator_name = OperatorRegistry::resolve_operator_name(
@@ -260,32 +273,44 @@ impl NotificationReport {
         ));
         lines.push("".to_string());
 
+        if is_security {
+            lines.push("🔒 *보안 이상 점검 결과:*".to_string());
+            if self.is_tampered {
+                lines.push("  • ❌ *위변조 의심 / 해시 체인 불일치*".to_string());
+            }
+            if self.alert_count > 0 {
+                lines.push(format!("  • ⚠️ *이상 경보 ({}건)*:", self.alert_count));
+                for a in &self.alerts {
+                    lines.push(format!("      - {}", a));
+                }
+            }
+            lines.push("".to_string());
+        }
+
         lines.push("📋 *수행한 주요 작업 내역:*".to_string());
         if self.key_activities.is_empty() {
             lines.push("  _(수행된 명령어 없음)_".to_string());
         } else {
             for (idx, act) in self.key_activities.iter().enumerate() {
-                lines.push(format!("  {}. {}", idx + 1, act));
+                if act.starts_with("_(") {
+                    lines.push(format!("  {}", act));
+                } else {
+                    lines.push(format!("  {}. {}", idx + 1, act));
+                }
             }
         }
         lines.push("".to_string());
 
-        lines.push("🔒 *보안 및 무결성 점검:*".to_string());
-        if self.alert_count == 0 {
+        if !is_security {
+            lines.push("🔒 *보안 및 무결성 점검:*".to_string());
             lines.push("  • 이상 경보: `0건 (정상/안전)`".to_string());
-        } else {
-            lines.push(format!("  • ⚠️ *이상 경보 ({}건)*:", self.alert_count));
-            for a in &self.alerts {
-                lines.push(format!("      - {}", a));
-            }
+            let tamper_status = if self.is_tampered {
+                "❌ *위변조 의심 / 해시 체인 불일치*"
+            } else {
+                "✅ *해시 체인 검증 완료 (SHA256)*"
+            };
+            lines.push(format!("  • 로그 무결성: {}", tamper_status));
         }
-
-        let tamper_status = if self.is_tampered {
-            "❌ *위변조 의심 / 해시 체인 불일치*"
-        } else {
-            "✅ *해시 체인 검증 완료 (SHA256)*"
-        };
-        lines.push(format!("  • 로그 무결성: {}", tamper_status));
 
         lines.join("\n")
     }
@@ -413,5 +438,58 @@ mod tests {
         assert!(md.contains("`git checkout -b feat/ai-trigger`"));
         assert!(md.contains("`cargo test`"));
         assert!(md.contains("✅ *해시 체인 검증 완료 (SHA256)*"));
+    }
+
+    #[test]
+    fn test_format_telegram_markdown_security_alert() {
+        let sid = Uuid::new_v4();
+        let init = SessionInit {
+            session_id: sid,
+            timestamp: Utc::now(),
+            hostname: "prod-server-01".into(),
+            username: "hacker".into(),
+            tty: "ttys002".into(),
+            client_ip: Some("203.0.113.5".into()),
+            client_port: Some(44221),
+            ssh_key_fingerprint: None,
+            ssh_key_comment: None,
+            env_context: None,
+        };
+
+        let activities = vec![ReconstructedActivity {
+            timestamp: Utc::now(),
+            content: "sudo -i".into(),
+            kind: ActivityKind::Command,
+            is_ai: false,
+        }];
+
+        let sudo_event = AuditEvent::KeystrokeInput(
+            argus_common::events::KeystrokeInput::new(
+                sid,
+                1,
+                100,
+                b"sudo -i\n".to_vec(),
+                true,
+            ),
+        );
+
+        let report = NotificationReport::build(
+            sid,
+            Some(&init),
+            SessionType::ShellSession,
+            TriggerReason::SecurityAnomaly {
+                alert_count: 1,
+                max_severity: "High".into(),
+            },
+            &activities,
+            &[sudo_event],
+            false,
+        );
+
+        let md = report.format_telegram_markdown();
+        assert!(md.contains("🚨 *[Argus Audit] 긴급 보안 이상 경보*"));
+        assert!(md.contains("⚠️ *이상 경보 (1건)*"));
+        assert!(md.contains("root shell escalation"));
+        assert!(md.contains("`sudo -i`"));
     }
 }
