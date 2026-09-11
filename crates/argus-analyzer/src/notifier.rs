@@ -189,8 +189,15 @@ impl NotificationReport {
     /// Format report into crisp, executive-grade Telegram Markdown
     pub fn format_telegram_markdown(&self) -> String {
         let dur_mins = (self.duration_secs + 59) / 60;
-        let start_str = self.start_time.format("%H:%M").to_string();
-        let end_str = self.end_time.format("%H:%M").to_string();
+        let kst = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+        let start_kst = self.start_time.with_timezone(&kst);
+        let end_kst = self.end_time.with_timezone(&kst);
+        let start_str = start_kst.format("%H:%M").to_string();
+        let end_str = if start_kst.date_naive() != end_kst.date_naive() {
+            end_kst.format("%m/%d %H:%M").to_string()
+        } else {
+            end_kst.format("%H:%M").to_string()
+        };
 
         let mut lines = Vec::new();
         let is_security = self.alert_count > 0
@@ -268,7 +275,7 @@ impl NotificationReport {
             self.trigger_reason.display_text()
         ));
         lines.push(format!(
-            "• *작업 구간:* `{} ~ {}` (약 {}분 작업)",
+            "• *작업 구간:* `{} ~ {} (KST)` (약 {}분 작업)",
             start_str, end_str, dur_mins
         ));
         lines.push("".to_string());
@@ -438,6 +445,7 @@ mod tests {
         assert!(md.contains("`git checkout -b feat/ai-trigger`"));
         assert!(md.contains("`cargo test`"));
         assert!(md.contains("✅ *해시 체인 검증 완료 (SHA256)*"));
+        assert!(md.contains("(KST)"));
     }
 
     #[test]
