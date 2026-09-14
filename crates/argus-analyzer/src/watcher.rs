@@ -100,6 +100,19 @@ impl SessionWatcher {
                             "Skipping notification dispatch for {} (0 activities, 0 alerts)",
                             s.session_id
                         );
+                        // Record checkpoint to avoid re-evaluating empty events
+                        if let Err(e) = self.store.record_notification(
+                            s.session_id,
+                            eval.latest_seq,
+                            &trigger_reason.display_text(),
+                            eval.session_type.display_name(),
+                            &summary_preview,
+                        ) {
+                            error!(
+                                "Failed to record notification checkpoint for session {}: {e}",
+                                s.session_id
+                            );
+                        }
                     } else {
                         // Debounce duplicate notifications sent within recent window
                         let is_duplicate = {
@@ -127,16 +140,18 @@ impl SessionWatcher {
                             }
                         };
 
+                        let mut should_checkpoint = false;
                         if is_duplicate {
                             info!(
                                 "Skipping duplicate notification for {} on {} (Summary: '{}')",
                                 s.session_id, report.hostname, summary_preview
                             );
+                            should_checkpoint = true;
                         } else if let Err(e) =
                             TelegramNotifier::send_report(&self.telegram_config, &report).await
                         {
                             error!(
-                                "Failed to dispatch Telegram notification for session {}: {e}",
+                                "Failed to dispatch Telegram notification for session {}: {e}. Retaining checkpoint for retry.",
                                 s.session_id
                             );
                         } else {
@@ -145,21 +160,23 @@ impl SessionWatcher {
                                 s.session_id,
                                 trigger_reason.display_text()
                             );
+                            should_checkpoint = true;
                         }
-                    }
 
-                    // Record checkpoint in SQLite
-                    if let Err(e) = self.store.record_notification(
-                        s.session_id,
-                        eval.latest_seq,
-                        &trigger_reason.display_text(),
-                        eval.session_type.display_name(),
-                        &summary_preview,
-                    ) {
-                        error!(
-                            "Failed to record notification checkpoint for session {}: {e}",
-                            s.session_id
-                        );
+                        if should_checkpoint {
+                            if let Err(e) = self.store.record_notification(
+                                s.session_id,
+                                eval.latest_seq,
+                                &trigger_reason.display_text(),
+                                eval.session_type.display_name(),
+                                &summary_preview,
+                            ) {
+                                error!(
+                                    "Failed to record notification checkpoint for session {}: {e}",
+                                    s.session_id
+                                );
+                            }
+                        }
                     }
                 } else {
                     info!(

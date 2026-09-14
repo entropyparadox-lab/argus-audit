@@ -321,7 +321,13 @@ impl NotificationReport {
             lines.push(format!("  • 로그 무결성: {}", tamper_status));
         }
 
-        lines.join("\n")
+        let mut text = lines.join("\n");
+        // Defensive safeguard against Telegram 4096 character limit
+        if text.chars().count() > 3900 {
+            let truncated: String = text.chars().take(3850).collect();
+            text = format!("{truncated}\n\n...(메시지 길이 제한으로 일부 내용 생략)");
+        }
+        text
     }
 }
 
@@ -375,6 +381,26 @@ impl TelegramNotifier {
 
         if !resp.status().is_success() {
             let err_body = resp.text().await.unwrap_or_default();
+            // Markdown parsing fallback: if Telegram rejected markdown entity parsing (e.g. unescaped bash chars), retry as plain text
+            if err_body.contains("can't parse") || err_body.contains("parse entities") {
+                tracing::warn!(
+                    "Telegram markdown entity parse failed, falling back to plain text dispatch: {err_body}"
+                );
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.remove("parse_mode");
+                }
+                let retry_resp = client
+                    .post(&url)
+                    .json(&payload)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Failed to send fallback plain text message: {e}"))?;
+                if !retry_resp.status().is_success() {
+                    let retry_err = retry_resp.text().await.unwrap_or_default();
+                    return Err(format!("Telegram API error (fallback): {retry_err}"));
+                }
+                return Ok(());
+            }
             return Err(format!("Telegram API error: {err_body}"));
         }
 
@@ -501,5 +527,46 @@ mod tests {
         assert!(md.contains("⚠️ *이상 경보 (1건)*"));
         assert!(md.contains("root shell escalation"));
         assert!(md.contains("`sudo -i`"));
+    }
+
+    #[test]
+    fn test_format_telegram_markdown_truncates_oversized_messages() {
+        let sid = Uuid::new_v4();
+        let init = SessionInit {
+            session_id: sid,
+            timestamp: Utc::now(),
+            hostname: "prod-server-01".into(),
+            username: "heavy-user".into(),
+            tty: "ttys003".into(),
+            client_ip: Some("127.0.0.1".into()),
+            client_port: Some(22),
+            ssh_key_fingerprint: None,
+            ssh_key_comment: None,
+            env_context: None,
+        };
+
+        // Create 50 long activities
+        let activities: Vec<_> = (0..50)
+            .map(|i| ReconstructedActivity {
+                timestamp: Utc::now(),
+                content: format!("echo 'very long string repeated {} times: {}'", i, "a".repeat(200)),
+                kind: ActivityKind::Command,
+                is_ai: false,
+            })
+            .collect();
+
+        let report = NotificationReport::build(
+            sid,
+            Some(&init),
+            SessionType::ShellSession,
+            TriggerReason::PeriodicRollup { elapsed_mins: 60 },
+            &activities,
+            &[],
+            false,
+        );
+
+        let md = report.format_telegram_markdown();
+        assert!(md.chars().count() <= 3950);
+        assert!(md.contains("⏱️ *[Argus Audit] 정기 작업 진행 요약 (1시간)*"));
     }
 }
