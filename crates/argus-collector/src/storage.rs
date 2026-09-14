@@ -370,6 +370,52 @@ impl AuditStore {
             .ok();
         Ok(seq.unwrap_or(0))
     }
+
+    /// Query the latest event timestamp across all sessions for a given hostname
+    pub fn get_host_latest_event_timestamp(&self, hostname: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.conn.lock().unwrap();
+        let ts_str: Option<String> = conn
+            .query_row(
+                "SELECT MAX(e.timestamp)
+                 FROM events e
+                 JOIN sessions s ON e.session_id = s.session_id
+                 WHERE s.hostname = ?1",
+                params![hostname],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        Ok(ts_str.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        }))
+    }
+
+    /// Query the latest routine (non-security) notification timestamp for a given hostname
+    pub fn get_host_last_routine_notification_timestamp(&self, hostname: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.conn.lock().unwrap();
+        let ts_str: Option<String> = conn
+            .query_row(
+                "SELECT MAX(sn.notified_at)
+                 FROM session_notifications sn
+                 JOIN sessions s ON sn.session_id = s.session_id
+                 WHERE s.hostname = ?1
+                   AND sn.trigger_reason NOT LIKE '%보안%'
+                   AND sn.trigger_reason NOT LIKE '%Security%'",
+                params![hostname],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        Ok(ts_str.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        }))
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
