@@ -114,13 +114,17 @@ enum Commands {
         #[arg(long, env = "ARGUS_TELEGRAM_THREAD_ID", allow_hyphen_values = true)]
         telegram_thread_id: Option<i64>,
 
-        /// Idle timeout for regular shell sessions in minutes (default: 15)
-        #[arg(long, default_value = "15")]
+        /// Idle timeout for regular shell sessions in minutes (default: 60)
+        #[arg(long, default_value = "60")]
         shell_idle_mins: u64,
 
-        /// Idle timeout for AI (Claude Code) sessions in minutes (default: 30)
-        #[arg(long, default_value = "30")]
+        /// Idle timeout for AI (Claude Code) sessions in minutes (default: 60)
+        #[arg(long, default_value = "60")]
         ai_idle_mins: u64,
+
+        /// Periodic rollup interval for active continuous work in minutes (default: 60)
+        #[arg(long, default_value = "60")]
+        periodic_rollup_mins: u64,
     },
 }
 
@@ -237,9 +241,11 @@ async fn main() -> Result<()> {
             telegram_thread_id,
             shell_idle_mins,
             ai_idle_mins,
+            periodic_rollup_mins,
         } => {
             let store = AuditStore::new(&cli.db)?;
-            let trigger_config = TriggerConfig::from_mins(shell_idle_mins, ai_idle_mins);
+            let trigger_config =
+                TriggerConfig::from_mins_with_rollup(shell_idle_mins, ai_idle_mins, periodic_rollup_mins);
 
             let mut telegram_config = TelegramConfig::from_env();
             if let Some(tok) = telegram_bot_token {
@@ -259,6 +265,7 @@ async fn main() -> Result<()> {
                 println!("  * Polling interval: {}s", interval);
                 println!("  * Shell idle threshold: {}m", shell_idle_mins);
                 println!("  * AI/Claude idle threshold: {}m", ai_idle_mins);
+                println!("  * Periodic continuous rollup: {}m", periodic_rollup_mins);
                 println!("  * Dry run: {}", dry_run);
                 watcher
                     .run_daemon(Duration::from_secs(interval), None)

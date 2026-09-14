@@ -34,6 +34,8 @@ pub enum TriggerReason {
     SessionExit { exit_status: Option<i32> },
     /// Triggered manually by operator or CLI
     Manual,
+    /// Periodic rollup fired for continuous ongoing work (e.g. 1 hour = 60m)
+    PeriodicRollup { elapsed_mins: u64 },
     /// Fired immediately upon detection of security anomalies or suspicious behavior
     SecurityAnomaly {
         alert_count: usize,
@@ -44,6 +46,9 @@ pub enum TriggerReason {
 impl TriggerReason {
     pub fn display_text(&self) -> String {
         match self {
+            TriggerReason::PeriodicRollup { elapsed_mins } => {
+                format!("⏱️ 정기 작업 요약 (약 {}분 연속 작업 진행 중)", elapsed_mins)
+            }
             TriggerReason::IdleTimeout {
                 idle_secs,
                 threshold_secs,
@@ -78,10 +83,12 @@ impl TriggerReason {
 
 #[derive(Debug, Clone)]
 pub struct TriggerConfig {
-    /// Idle timeout for regular terminal sessions (default: 15 minutes = 900s)
+    /// Idle timeout for regular terminal sessions (default: 60 minutes = 3600s)
     pub shell_idle_secs: u64,
-    /// Dynamic expanded idle timeout for AI / Claude sessions (default: 30 minutes = 1800s)
+    /// Dynamic expanded idle timeout for AI / Claude sessions (default: 60 minutes = 3600s)
     pub ai_idle_secs: u64,
+    /// Periodic continuous active work rollup interval (default: 60 minutes = 3600s)
+    pub periodic_rollup_secs: u64,
     /// Minimum unnotified input bytes before triggering
     pub min_input_bytes: usize,
     /// Minimum command count
@@ -95,8 +102,9 @@ pub struct TriggerConfig {
 impl Default for TriggerConfig {
     fn default() -> Self {
         Self {
-            shell_idle_secs: 900,  // 15 minutes (was 3m)
-            ai_idle_secs: 1800,    // 30 minutes (was 15m)
+            shell_idle_secs: 3600, // 60 minutes
+            ai_idle_secs: 3600,    // 60 minutes
+            periodic_rollup_secs: 3600, // 60 minutes
             min_input_bytes: 3,
             min_commands: 1,
             min_duration_secs: 2,
@@ -120,6 +128,20 @@ impl TriggerConfig {
         Self {
             shell_idle_secs: shell_idle_mins * 60,
             ai_idle_secs: ai_idle_mins * 60,
+            periodic_rollup_secs: 3600,
+            ..Default::default()
+        }
+    }
+
+    pub fn from_mins_with_rollup(
+        shell_idle_mins: u64,
+        ai_idle_mins: u64,
+        periodic_rollup_mins: u64,
+    ) -> Self {
+        Self {
+            shell_idle_secs: shell_idle_mins * 60,
+            ai_idle_secs: ai_idle_mins * 60,
+            periodic_rollup_secs: periodic_rollup_mins * 60,
             ..Default::default()
         }
     }
@@ -264,7 +286,7 @@ impl AiAwareTriggerEvaluator {
                 });
             }
         } else {
-            // Trigger B: Dynamic Idle Timeout (15m Shell vs 30m AI)
+            // Trigger B: Dynamic Idle Timeout (e.g. 60m Shell vs 60m AI)
             let threshold_secs = if session_type.is_ai() {
                 config.ai_idle_secs
             } else {
@@ -276,6 +298,35 @@ impl AiAwareTriggerEvaluator {
                     idle_secs,
                     threshold_secs,
                 });
+            } else if config.periodic_rollup_secs > 0
+                && !unnotified_session.activities.is_empty()
+                && idle_secs < 900
+            {
+                // Trigger C: Periodic Rollup for continuous active work (e.g. 60m of continuous session)
+                let gap_threshold = chrono::Duration::seconds(threshold_secs as i64);
+                let mut streak_start = unnotified_events
+                    .first()
+                    .map(|e| e.timestamp())
+                    .unwrap_or(session_created_at);
+                let mut prev_ts = streak_start;
+
+                for ev in &unnotified_events {
+                    let ts = ev.timestamp();
+                    if ts.signed_duration_since(prev_ts) > gap_threshold {
+                        streak_start = ts;
+                    }
+                    prev_ts = ts;
+                }
+
+                let continuous_work_secs = last_activity
+                    .signed_duration_since(streak_start)
+                    .num_seconds()
+                    .max(0) as u64;
+
+                if continuous_work_secs >= config.periodic_rollup_secs {
+                    let elapsed_mins = (continuous_work_secs + 59) / 60;
+                    trigger_reason = Some(TriggerReason::PeriodicRollup { elapsed_mins });
+                }
             }
         }
 
@@ -560,5 +611,173 @@ mod tests {
             eval.noise_reason,
             Some("Suppressed environment wrapper session".to_string())
         );
+    }
+
+    #[test]
+    fn test_periodic_rollup_triggers_after_1hr_continuous_work() {
+        let sid = Uuid::new_v4();
+        let config = TriggerConfig::default(); // 60m idle, 60m rollup
+        let start = Utc::now() - Duration::minutes(70);
+
+        // Continuous typing every 5 minutes from T=0 to T=65m
+        let mut events = Vec::new();
+        for m in (0..=65).step_by(5) {
+            let cmd = format!("cargo build --step {}\n", m);
+            events.push(AuditEvent::KeystrokeInput(
+                KeystrokeInput::new(sid, events.len() as u64 + 1, 100, cmd.into_bytes(), true)
+                    .with_timestamp(start + Duration::minutes(m)),
+            ));
+        }
+
+        // Evaluate at T=66m (idle is 1 minute, work duration is 65 minutes >= 60m rollup)
+        let eval = AiAwareTriggerEvaluator::evaluate(
+            sid,
+            start,
+            &events,
+            0,
+            start + Duration::minutes(66),
+            &config,
+        );
+
+        assert!(eval.should_notify);
+        assert!(!eval.is_noise);
+        match eval.trigger_reason {
+            Some(TriggerReason::PeriodicRollup { elapsed_mins }) => {
+                assert_eq!(elapsed_mins, 65);
+            }
+            other => panic!("Expected PeriodicRollup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_periodic_rollup_does_not_trigger_when_user_is_idle() {
+        let sid = Uuid::new_v4();
+        let config = TriggerConfig::default(); // 60m idle, 60m rollup
+        let start = Utc::now() - Duration::minutes(65);
+
+        // User typed for 10 minutes, then was AFK for 50 minutes
+        let mut events = Vec::new();
+        for m in [0, 5, 10] {
+            let cmd = format!("git status -s {}\n", m);
+            events.push(AuditEvent::KeystrokeInput(
+                KeystrokeInput::new(sid, events.len() as u64 + 1, 100, cmd.into_bytes(), true)
+                    .with_timestamp(start + Duration::minutes(m)),
+            ));
+        }
+
+        // Evaluate at T=60m: idle is 50 minutes (< 60m threshold), total span is 60m.
+        // Should NOT fire PeriodicRollup because user is currently idle/abandoned (idle >= 15m),
+        // and should NOT fire IdleTimeout because idle < 60m.
+        let eval = AiAwareTriggerEvaluator::evaluate(
+            sid,
+            start,
+            &events,
+            0,
+            start + Duration::minutes(60),
+            &config,
+        );
+
+        assert!(!eval.should_notify);
+        assert_eq!(eval.trigger_reason, None);
+    }
+
+    #[test]
+    fn test_idle_timeout_triggers_at_1hr_idle() {
+        let sid = Uuid::new_v4();
+        let config = TriggerConfig::default(); // 60m idle
+        let start = Utc::now() - Duration::minutes(75);
+
+        let event = AuditEvent::KeystrokeInput(
+            KeystrokeInput::new(sid, 1, 100, b"npm run build\n".to_vec(), true)
+                .with_timestamp(start),
+        );
+
+        // Evaluate at T=61m after event (idle is 61 minutes >= 60m threshold)
+        let eval = AiAwareTriggerEvaluator::evaluate(
+            sid,
+            start,
+            &[event],
+            0,
+            start + Duration::minutes(61),
+            &config,
+        );
+
+        assert!(eval.should_notify);
+        match eval.trigger_reason {
+            Some(TriggerReason::IdleTimeout { idle_secs, threshold_secs }) => {
+                assert!(idle_secs >= 3600);
+                assert_eq!(threshold_secs, 3600);
+            }
+            other => panic!("Expected IdleTimeout, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_immediate_security_alert_bypasses_1hr_periodic_and_idle() {
+        let sid = Uuid::new_v4();
+        let config = TriggerConfig::default(); // 60m thresholds
+        let start = Utc::now() - Duration::minutes(1);
+
+        let sudo_event = AuditEvent::KeystrokeInput(
+            KeystrokeInput::new(sid, 1, 100, b"sudo -i\n".to_vec(), true)
+                .with_timestamp(start),
+        );
+
+        // Check after just 2 seconds
+        let eval = AiAwareTriggerEvaluator::evaluate(
+            sid,
+            start,
+            &[sudo_event],
+            0,
+            start + Duration::seconds(2),
+            &config,
+        );
+
+        assert!(eval.should_notify);
+        match eval.trigger_reason {
+            Some(TriggerReason::SecurityAnomaly { alert_count, max_severity }) => {
+                assert_eq!(alert_count, 1);
+                assert_eq!(max_severity, "Medium");
+            }
+            other => panic!("Expected immediate SecurityAnomaly, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_periodic_rollup_ignores_ancient_noise_gap() {
+        let sid = Uuid::new_v4();
+        let config = TriggerConfig::default(); // 60m thresholds
+        let yesterday = Utc::now() - Duration::hours(24);
+        let today = Utc::now() - Duration::minutes(10);
+
+        // Event from yesterday
+        let ev1 = AuditEvent::KeystrokeInput(
+            KeystrokeInput::new(sid, 1, 100, b"ls -la\n".to_vec(), true)
+                .with_timestamp(yesterday),
+        );
+
+        // Events today (10 minutes ago, 5 minutes ago)
+        let ev2 = AuditEvent::KeystrokeInput(
+            KeystrokeInput::new(sid, 2, 100, b"cargo check\n".to_vec(), true)
+                .with_timestamp(today),
+        );
+        let ev3 = AuditEvent::KeystrokeInput(
+            KeystrokeInput::new(sid, 3, 100, b"cargo test\n".to_vec(), true)
+                .with_timestamp(today + Duration::minutes(5)),
+        );
+
+        // Evaluate at today + 6m: idle is 1 minute, active work today is only 5 minutes.
+        let eval = AiAwareTriggerEvaluator::evaluate(
+            sid,
+            yesterday,
+            &[ev1, ev2, ev3],
+            0,
+            today + Duration::minutes(6),
+            &config,
+        );
+
+        // Should NOT trigger PeriodicRollup (continuous work is only 5 mins today, not 24h)
+        assert!(!eval.should_notify);
+        assert_eq!(eval.trigger_reason, None);
     }
 }

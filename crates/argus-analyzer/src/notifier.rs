@@ -206,6 +206,8 @@ impl NotificationReport {
 
         if is_security {
             lines.push("🚨 *[Argus Audit] 긴급 보안 이상 경보*".to_string());
+        } else if matches!(self.trigger_reason, TriggerReason::PeriodicRollup { .. }) {
+            lines.push("⏱️ *[Argus Audit] 정기 작업 진행 요약 (1시간)*".to_string());
         } else {
             lines.push("🛡️ *[Argus Audit] 작업 완료 알림*".to_string());
         }
